@@ -1,6 +1,7 @@
 [package]
 name = "langshell"
 description = "Rust SDK for building stateful, capability-scoped LangShell runtimes."
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,9 +13,9 @@ keywords = ["ai", "agents", "sandbox", "python", "runtime"]
 categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
-langshell-core = { path = "../langshell-core" }
-langshell-monty = { path = "../langshell-monty" }
-langshell-tools = { path = "../langshell-tools" }
+langshell-core = { path = "../langshell-core", version = "0.1" }
+langshell-monty = { path = "../langshell-monty", version = "0.1" }
+langshell-tools = { path = "../langshell-tools", version = "0.1" }
 serde_json = { workspace = true }
 
 [dev-dependencies]

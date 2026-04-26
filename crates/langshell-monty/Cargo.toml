@@ -1,6 +1,7 @@
 [package]
 name = "langshell-monty"
 description = "Monty-backed LangShell runtime with persistent sessions, validation, and snapshots."
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,8 +13,8 @@ keywords = ["ai", "agents", "sandbox", "python", "monty"]
 categories = ["asynchronous", "development-tools"]
 
 [dependencies]
+langshell-core = { path = "../langshell-core", version = "0.1" }
 futures = { workspace = true }
-langshell-core = { path = "../langshell-core" }
 monty = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
