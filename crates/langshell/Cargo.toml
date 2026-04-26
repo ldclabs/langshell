@@ -1,8 +1,15 @@
 [package]
 name = "langshell"
+description = "Rust SDK for building stateful, capability-scoped LangShell runtimes."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/langshell"
+keywords = ["ai", "agents", "sandbox", "python", "runtime"]
+categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
 langshell-core = { path = "../langshell-core" }

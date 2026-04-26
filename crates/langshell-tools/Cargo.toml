@@ -1,8 +1,15 @@
 [package]
 name = "langshell-tools"
+description = "Built-in discovery, filesystem, and HTTP capability helpers for LangShell hosts."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/langshell-tools"
+keywords = ["ai", "agents", "sandbox", "tools", "filesystem"]
+categories = ["api-bindings", "development-tools"]
 
 [dependencies]
 langshell-core = { path = "../langshell-core" }

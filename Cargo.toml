@@ -6,6 +6,9 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+rust-version = "1.85"
+homepage = "https://github.com/ldclabs/langshell"
+repository = "https://github.com/ldclabs/langshell"
 
 [workspace.dependencies]
 async-trait = "0.1"

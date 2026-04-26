@@ -1,4 +1,4 @@
-# LangShell
+# 🖥️ LangShell
 
 > Stateful, capability-scoped, sandboxed code execution for AI agents.
 

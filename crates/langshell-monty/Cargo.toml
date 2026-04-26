@@ -1,8 +1,15 @@
 [package]
 name = "langshell-monty"
+description = "Monty-backed LangShell runtime with persistent sessions, validation, and snapshots."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/langshell-monty"
+keywords = ["ai", "agents", "sandbox", "python", "monty"]
+categories = ["asynchronous", "development-tools"]
 
 [dependencies]
 futures = { workspace = true }

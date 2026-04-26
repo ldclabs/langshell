@@ -1,4 +1,4 @@
-# LangShell
+# 🖥️ LangShell
 
 > Stateful, capability-scoped, sandboxed code execution for AI agents.
 
@@ -10,14 +10,16 @@ The project is implemented in Rust. The MVP uses Pydantic Monty as the Python-su
 
 ## Current Status
 
-This repository now contains an MVP implementation of the core LangShell flow.
+This repository contains a working MVP of the core LangShell flow, not just crate scaffolding.
 
-- The Cargo workspace, crate split, Monty dependency patch, and design contract documents are in place.
-- `langshell-core`, `langshell-monty`, `langshell-tools`, `langshell`, and `langshell-cli` implement the MVP run, validate, session, snapshot, SDK, and JSON-RPC daemon paths.
-- [AGENTS.md](AGENTS.md) remains the most complete source of product requirements and engineering contracts.
-- [SKILL.md](SKILL.md) describes how an AI agent is expected to use LangShell safely.
+- `langshell-core` defines the stable data contracts for sessions, tools, diagnostics, errors, and snapshots.
+- `langshell-monty` runs Python-subset code in persistent Monty sessions, supports validation, captures `result` and final-expression values, and records external calls.
+- `langshell-tools` registers discovery tools plus opt-in file and HTTP capability helpers for hosts.
+- `langshell` exposes a Rust SDK builder for mounts, allowlists, and custom sync or async capabilities.
+- `langshell-cli` provides `run`, `validate`, `repl`, `daemon`, `session`, and `tools` commands with stable JSON output.
+- End-to-end scripts and SDK coverage live under [examples/README.md](./examples/README.md) and `crates/langshell/tests`.
 
-The MVP is intentionally narrow: it focuses on stable JSON results, stateful Monty execution, explicit capabilities, and the end-to-end acceptance cases in [AGENTS.md](AGENTS.md).
+[AGENTS.md](AGENTS.md) remains the source of truth for product requirements and engineering contracts, and [SKILL.md](SKILL.md) describes how an AI agent should use LangShell safely.
 
 ## Why LangShell
 
@@ -46,20 +48,29 @@ It aims to serve three groups at once:
 - Every side effect is mediated: file, network, database, and other side effects must pass through host-defined capabilities.
 - Errors are for agents: errors must be stable, structured, and useful for automatic repair and retry.
 
-## Target Capabilities
+## Implemented MVP Scope
 
-The LangShell MVP is intended to provide:
+The current MVP provides:
 
 - Stateful execution of a Python subset.
 - Top-level await and async capability calls.
 - Validate and dry-run modes that catch syntax, type, permission, and tool-availability issues without causing side effects.
 - A capability registry so the host can expose controlled external functions.
-- Capability discovery interfaces such as list_tools, describe_tool, and current_policy.
+- Capability discovery interfaces such as `list_tools`, `describe_tool`, and `current_policy`.
 - Structured results, stdout and stderr capture, diagnostics, and stable error codes.
+- Result capture priority of global `result`, then last expression, then stdout fallback.
 - Limits for timeout, cancellation, output size, memory, and external call counts.
 - Snapshot and restore for resumability and approval-boundary pauses.
+- A Unix-socket JSON-RPC daemon path for session and tool operations.
 
-The MVP prioritizes controlled file and HTTP access, including capabilities such as read_text, write_text, list_dir, fetch_text, and fetch_json.
+The MVP also includes host-side helpers for controlled file and HTTP capability wiring, including `read_text`, `write_text`, `list_dir`, `fetch_text`, and `fetch_json`.
+
+## Current Limitations
+
+- The executable backend is Python-only today; TypeScript and Deno remain future work.
+- File tools are only available when the host configures authorized mounts through the SDK builder.
+- The built-in HTTP helpers enforce allowlists and capability shape, but do not ship a real network transport in the default build. Hosts should register their own `fetch_text` or `fetch_json` handlers for live HTTP access.
+- The CLI daemon currently supports `unix://` listeners only.
 
 ## Architecture Overview
 
@@ -90,6 +101,16 @@ Responsibilities are split along these boundaries:
 - `langshell-cli`: the developer-facing command-line entry point, intended to host commands such as run, validate, repl, daemon, session, and tools.
 - `langshell`: the public Rust SDK for hosts to integrate the runtime, register capabilities, and initiate execution.
 
+## Crates
+
+| Crate             | Role                                                                                                            |
+| ----------------- | --------------------------------------------------------------------------------------------------------------- |
+| `langshell-core`  | Stable Rust and JSON-facing contracts for sessions, capabilities, diagnostics, metrics, and snapshots.          |
+| `langshell-monty` | Monty-backed runtime implementation with persistent sessions, validation, result capture, and snapshot support. |
+| `langshell-tools` | Built-in discovery tools and host-configurable file and HTTP capability helpers.                                |
+| `langshell`       | Public Rust SDK for building runtimes, configuring policy, and registering sync or async capabilities.          |
+| `langshell-cli`   | CLI binary and line-delimited JSON-RPC daemon for running code and inspecting sessions.                         |
+
 ## Repository Layout
 
 ```text
@@ -108,13 +129,15 @@ langshell/
 └── README.md
 ```
 
-Each crate is still an initialization skeleton, but the directory boundaries already align with the engineering contract defined in the product documentation and are ready for implementation work.
+The crate layout mirrors the engineering contract in [AGENTS.md](AGENTS.md) while mapping cleanly onto the code that ships in this MVP.
 
-## Target Interface Examples
+## Interface Examples
 
-The following examples describe the intended LangShell experience. They do not imply that these commands or behaviors are already implemented in this repository.
+The following examples correspond to code paths that exist in this repository today.
 
 ### Agent-Side Python
+
+This is the shape of code an agent can run once a host has registered the required capabilities:
 
 ```python
 import json
@@ -129,16 +152,20 @@ result = await main()
 print(json.dumps(result))
 ```
 
-### Target CLI Shape
+### CLI Commands Available Today
 
 ```bash
-langshell run -e 'result = sum(range(10))' --json
-langshell validate -f script.py --session-id agent-123
-langshell daemon --listen unix:///tmp/langshell.sock
-langshell session snapshot agent-123 --out snapshot.bin
+cargo run -q -p langshell-cli --bin langshell -- run -e 'result = sum(range(10))' --json
+cargo run -q -p langshell-cli --bin langshell -- validate -e 'open("/etc/passwd")' --json
+cargo run -q -p langshell-cli --bin langshell -- session list
+cargo run -q -p langshell-cli --bin langshell -- daemon --listen unix:///tmp/langshell.sock
 ```
 
-### Target JSON-RPC Shape
+The repository also includes shell scripts for the acceptance flows in [examples/README.md](./examples/README.md).
+
+### JSON-RPC Request Shape
+
+The daemon speaks line-delimited JSON-RPC 2.0 over a Unix socket.
 
 ```json
 {
@@ -186,27 +213,38 @@ If you have already cloned the repository:
 git submodule update --init --recursive
 ```
 
-### Basic Checks Available Today
+### Build and Test
 
-While the repository is still in the skeleton stage, the most useful checks are:
+The baseline checks for the workspace are:
 
 ```bash
 cargo check
 cargo test
 ```
 
-As the runtime and CLI are implemented, examples, end-to-end coverage, and the security test matrix should be added incrementally.
+### Try the End-to-End Examples
 
-## Suggested Implementation Order
+Run the acceptance scripts from the repository root:
 
-If you plan to build the MVP from this skeleton, a reasonable order is:
+```bash
+bash examples/cli_single.sh
+bash examples/session_reuse.sh
+bash examples/validate_denied.sh
+bash examples/snapshot_restore.sh
+cargo run -q -p langshell --example sdk_async_fanout
+```
 
-1. Define stable data structures, error codes, and trait boundaries in `langshell-core`.
-2. Complete Monty execution integration and result capture in `langshell-monty`.
-3. Implement the minimum built-in capabilities in `langshell-tools`: file read/write, directory listing, and HTTP fetch.
-4. Provide a builder and session execution interface in `langshell`.
-5. Implement the run, validate, daemon, session, and tools commands in `langshell-cli`.
-6. Add snapshots, JSON-RPC support, end-to-end examples, and the security test matrix.
+To start the daemon manually:
+
+```bash
+cargo run -q -p langshell-cli --bin langshell -- daemon --listen unix:///tmp/langshell.sock
+```
+
+The CLI persists session snapshots under `LANGSHELL_SESSION_DIR` when set, or under the platform temporary directory by default.
+
+## Near-Term Focus
+
+The next implementation steps are the remaining V1 items from the product contract: a durable snapshot store, richer tool description stubs, more transport-backed capability modules, and broader security and compatibility coverage.
 
 ## Documentation
 

@@ -1,8 +1,16 @@
 [package]
 name = "langshell-cli"
+description = "CLI and Unix-socket JSON-RPC daemon for LangShell."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/langshell-cli"
+keywords = ["ai", "agents", "sandbox", "cli", "daemon"]
+categories = ["command-line-utilities", "development-tools"]
+default-run = "langshell"
 
 [dependencies]
 base64 = { workspace = true }
