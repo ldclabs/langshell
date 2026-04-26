@@ -137,6 +137,9 @@ When you see one of these `error.code` values, react accordingly:
 | `TOOL_ERROR` | External function failed | Preserve its inner `code` and `message` in your final result |
 | `INTERRUPTED` | Paused at an approval/tool boundary | Resume from `snapshot_id` after approval |
 | `SNAPSHOT_*` | Snapshot load failure | Do not retry blindly; report to the host |
+| `INVALID_SESSION_ID` / `INVALID_TOOL_NAME` / `INVALID_ARGUMENT` | Host request shape is invalid | Fix the session id, tool name, or request parameters |
+| `METHOD_NOT_FOUND` / `SESSION_NOT_FOUND` | Requested host method or session does not exist | Check the method name or create/load the session first |
+| `IO_ERROR` / `SERIALIZE_ERROR` | Host-side file/socket/JSON failure | Report the host error; retry only after the environment is fixed |
 
 ## Idempotency For Side Effects
 

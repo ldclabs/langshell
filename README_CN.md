@@ -10,14 +10,14 @@ LangShell 是一个面向 AI Agent 的安全执行层，目标是让 Agent 直�
 
 ## 当前状态
 
-这个仓库目前仍处于启动骨架阶段。
+这个仓库现在已经包含 LangShell 核心流程的 MVP 实现。
 
-- 已有 Cargo workspace、crate 拆分、Monty 依赖补丁与设计契约文档。
-- 尚未完成运行时、CLI 二进制、内置工具、示例与端到端测试实现。
-- [AGENTS.md](AGENTS.md) 是当前最完整的产品需求与工程契约来源。
-- [SKILL.md](SKILL.md) 描述了 AI Agent 在未来如何安全地使用 LangShell。
+- Cargo workspace、crate 拆分、Monty 依赖补丁与设计契约文档已经就位。
+- `langshell-core`、`langshell-monty`、`langshell-tools`、`langshell`、`langshell-cli` 已实现 MVP 的 run、validate、session、snapshot、SDK 与 JSON-RPC daemon 路径。
+- [AGENTS.md](AGENTS.md) 仍是最完整的产品需求与工程契约来源。
+- [SKILL.md](SKILL.md) 描述了 AI Agent 如何安全地使用 LangShell。
 
-README 以“产品说明 + 仓库导航 + 开发落地入口”为目标编写，并会明确区分“规划能力”和“当前已实现内容”。
+当前 MVP 有意保持范围收敛：优先保证稳定 JSON 结果、Monty 状态执行、显式 capability，以及 [AGENTS.md](AGENTS.md) 中的端到端验收用例。
 
 ## 为什么是 LangShell
 

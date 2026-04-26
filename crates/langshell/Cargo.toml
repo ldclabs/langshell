@@ -5,3 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+langshell-core = { path = "../langshell-core" }
+langshell-monty = { path = "../langshell-monty" }
+langshell-tools = { path = "../langshell-tools" }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

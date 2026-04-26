@@ -579,6 +579,18 @@ MVP 必须实现的错误码（与 `RunStatus` 的对应在括号内）：
 
 实现要求：错误码字符串永不重命名；新增码必须更新 §17 与 SKILL 文档。
 
+MVP 实现辅助错误码（主要用于 CLI / SDK / JSON-RPC 宿主层输入与 I/O）：
+
+| Code                 | 触发条件                                   | Status           |
+| -------------------- | ------------------------------------------ | ---------------- |
+| `INVALID_SESSION_ID` | session id 不符合 `^[a-zA-Z0-9_\-]{1,64}$` | validation_error |
+| `INVALID_TOOL_NAME`  | capability 名称不是合法 Python 标识符      | validation_error |
+| `INVALID_ARGUMENT`   | CLI / JSON-RPC 参数缺失或形状错误          | validation_error |
+| `METHOD_NOT_FOUND`   | JSON-RPC 方法未实现                        | validation_error |
+| `SESSION_NOT_FOUND`  | 请求 snapshot 一个不存在的 session         | validation_error |
+| `IO_ERROR`           | CLI 文件、socket 或 session store I/O 失败 | runtime_error    |
+| `SERIALIZE_ERROR`    | 宿主层 JSON 输出序列化失败                 | runtime_error    |
+
 ## 18. 安全测试矩阵（MVP 必过）
 
 每条用例对应 `crates/langshell-core/tests/` 或 `examples/` 中的一个测试。

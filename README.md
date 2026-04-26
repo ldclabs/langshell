@@ -10,14 +10,14 @@ The project is implemented in Rust. The MVP uses Pydantic Monty as the Python-su
 
 ## Current Status
 
-This repository is still at the bootstrap skeleton stage.
+This repository now contains an MVP implementation of the core LangShell flow.
 
-- The Cargo workspace, crate split, Monty dependency patch, and design contract documents are already in place.
-- The runtime, CLI binary, built-in tools, examples, and end-to-end tests are not implemented yet.
-- [AGENTS.md](AGENTS.md) is currently the most complete source of product requirements and engineering contracts.
-- [SKILL.md](SKILL.md) describes how an AI agent is expected to use LangShell safely in the future.
+- The Cargo workspace, crate split, Monty dependency patch, and design contract documents are in place.
+- `langshell-core`, `langshell-monty`, `langshell-tools`, `langshell`, and `langshell-cli` implement the MVP run, validate, session, snapshot, SDK, and JSON-RPC daemon paths.
+- [AGENTS.md](AGENTS.md) remains the most complete source of product requirements and engineering contracts.
+- [SKILL.md](SKILL.md) describes how an AI agent is expected to use LangShell safely.
 
-This README is written as a product overview, repository guide, and implementation entry point. It explicitly distinguishes planned capabilities from what is actually implemented today.
+The MVP is intentionally narrow: it focuses on stable JSON results, stateful Monty execution, explicit capabilities, and the end-to-end acceptance cases in [AGENTS.md](AGENTS.md).
 
 ## Why LangShell
 
