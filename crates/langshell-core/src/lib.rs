@@ -418,6 +418,39 @@ impl ToolError {
 }
 
 pub type ToolResult = Result<Value, ToolError>;
+pub type RuntimeFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub trait LanguageRuntime: fmt::Debug + Send + Sync {
+    fn language(&self) -> Language;
+
+    fn create_session(
+        &self,
+        session_id: SessionId,
+        limits: Option<SessionLimits>,
+    ) -> RuntimeFuture<'_, Result<(), ErrorObject>>;
+
+    fn run(&self, request: RunRequest) -> RuntimeFuture<'_, RunResult>;
+
+    fn destroy_session(
+        &self,
+        session_id: SessionId,
+    ) -> RuntimeFuture<'_, Result<bool, ErrorObject>>;
+
+    fn list_sessions(&self) -> RuntimeFuture<'_, Result<Vec<SessionId>, ErrorObject>>;
+
+    fn snapshot_session(
+        &self,
+        session_id: SessionId,
+    ) -> RuntimeFuture<'_, Result<Vec<u8>, ErrorObject>>;
+
+    fn restore_session(
+        &self,
+        snapshot: Vec<u8>,
+        session_id: Option<SessionId>,
+    ) -> RuntimeFuture<'_, Result<SessionId, ErrorObject>>;
+
+    fn can_restore_snapshot(&self, snapshot: &[u8]) -> bool;
+}
 pub type ToolFuture = Pin<Box<dyn Future<Output = ToolResult> + Send + 'static>>;
 pub type ToolFn = dyn Fn(ToolCallContext) -> ToolFuture + Send + Sync + 'static;
 

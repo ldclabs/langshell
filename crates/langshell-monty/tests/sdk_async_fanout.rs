@@ -1,9 +1,11 @@
 use langshell::{LangShell, RunStatus, SideEffect};
+use langshell_monty::MontyRuntime;
 use serde_json::{Value, json};
 
 #[tokio::test]
 async fn sdk_registered_async_fetch_json_fans_out() {
     let shell = LangShell::builder()
+        .runtime(MontyRuntime::new)
         .register_async(
             "fetch_json",
             "Test fetch_json capability.",

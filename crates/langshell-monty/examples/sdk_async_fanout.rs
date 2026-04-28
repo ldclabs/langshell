@@ -1,9 +1,11 @@
 use langshell::{LangShell, SideEffect};
+use langshell_monty::MontyRuntime;
 use serde_json::{Value, json};
 
 #[tokio::main]
 async fn main() {
     let shell = LangShell::builder()
+        .runtime(MontyRuntime::new)
         .register_async(
             "fetch_json",
             "Example fetch_json capability.",

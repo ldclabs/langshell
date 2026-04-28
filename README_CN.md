@@ -13,7 +13,8 @@ LangShell 是一个面向 AI Agent 的安全执行层，目标是让 Agent 直�
 这个仓库现在已经包含 LangShell 核心流程的 MVP 实现。
 
 - Cargo workspace、crate 拆分、Monty 依赖补丁与设计契约文档已经就位。
-- `langshell-core`、`langshell-monty`、`langshell-tools`、`langshell`、`langshell-cli` 已实现 MVP 的 run、validate、session、snapshot、SDK 与 JSON-RPC daemon 路径。
+- `langshell-core`、`langshell-monty`、`langshell-deno`、`langshell-tools`、`langshell`、`langshell-cli` 已实现 MVP 的 run、validate、session、snapshot、SDK 与 JSON-RPC daemon 路径。
+- 公共 SDK `langshell` 已与具体后端解耦；宿主通过 `LanguageRuntime` trait 自行选择并注册 `langshell-monty` 或 `langshell-deno`。
 - [AGENTS.md](AGENTS.md) 仍是最完整的产品需求与工程契约来源。
 - [SKILL.md](SKILL.md) 描述了 AI Agent 如何安全地使用 LangShell。
 
@@ -71,35 +72,43 @@ Agent / Host App
 		+-- Rust SDK
 						|
 						v
-			langshell-core
+            langshell SDK
 						|
-		 +------+-------+
-		 |              |
-		 v              v
-langshell-monty  langshell-tools
-		 |
-		 v
-	 Monty VM
+		 +------+----------------+
+		 |                       |
+		 v                       v
+langshell-tools      langshell-core
+										|
+										v
+						LanguageRuntime trait
+										|
+	 +------------------+------------------+
+	 |                                     |
+	 v                                     v
+langshell-monty                       langshell-deno
+	 |                                     |
+	 v                                     v
+ Monty VM                              Deno/V8
 ```
 
 职责划分遵循以下边界：
 
-- `langshell-core`：核心抽象，包括 session、policy、registry、snapshot、diagnostics 的稳定契约。
+- `langshell-core`：核心抽象，包括 session、policy、registry、snapshot、diagnostics 与 `LanguageRuntime` 后端 trait 的稳定契约。
 - `langshell-monty`：MVP 执行后端，封装所有 Monty 相关适配。
+- `langshell-deno`：TypeScript / Deno 执行后端，实现同一 runtime trait。
 - `langshell-tools`：内置能力模块，例如文件与 HTTP 工具。
 - `langshell-cli`：面向开发者的命令行入口，未来承载 run、validate、repl、daemon、session、tools 等命令。
-- `langshell`：公共 Rust SDK，供宿主集成运行时、注册能力与发起执行。
+- `langshell`：公共 Rust SDK，供宿主注册能力、选择后端并发起执行，本身不依赖具体执行引擎。
 
 ## 仓库结构
 
 ```text
 langshell/
-├── monty/                  # 上游执行引擎 submodule
-├── deno/                   # 未来 TypeScript / Deno backend submodule
 ├── crates/
 │   ├── langshell/
 │   ├── langshell-cli/
 │   ├── langshell-core/
+│   ├── langshell-deno/
 │   ├── langshell-monty/
 │   └── langshell-tools/
 ├── docs/

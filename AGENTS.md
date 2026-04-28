@@ -291,6 +291,7 @@ Rust SDK 是宿主集成的核心接口：
 
 ```rust
 let runtime = LangShell::builder()
+    .runtime(langshell_monty::MontyRuntime::new)
     .memory_limit_mb(64)
     .timeout_ms(5_000)
     .cancel_token(cancel_token)
@@ -307,7 +308,7 @@ let result = runtime
     .await?;
 ```
 
-SDK 需要强制开发者显式声明能力、限制和副作用等级，避免无意暴露宿主环境。
+SDK 需要强制开发者显式声明 runtime backend、能力、限制和副作用等级，避免无意暴露宿主环境。
 
 ## 7. 状态码与结果语义
 
@@ -423,20 +424,22 @@ langshell/
 ├── crates/
 │   ├── langshell-core/     # session、policy、registry、snapshot、diagnostics 抽象（无引擎依赖）
 │   ├── langshell-monty/    # core 接口的 Monty 实现（MVP 默认 backend）
+│   ├── langshell-deno/     # core 接口的 Deno / TypeScript 实现
 │   ├── langshell-tools/    # 内置能力：read_text/write_text/list_dir/fetch_text/fetch_json
 │   ├── langshell-cli/      # `langshell` 二进制：run/validate/repl/daemon/session/tools
-│   └── langshell/          # 公共 Rust SDK（builder、register_async、run）
+│   └── langshell/          # 公共 Rust SDK（builder、runtime、register_async、run）
 ├── docs/
 └── examples/               # CLI / daemon / SDK 各一个 e2e 示例
 ```
 
 模块边界规则：
 
-- `langshell-core` 不得依赖具体执行引擎，只定义 trait 与数据类型。
+- `langshell-core` 不得依赖具体执行引擎，只定义 trait 与数据类型，包括 `LanguageRuntime` 后端抽象。
 - `langshell-monty` 是唯一可以依赖 `monty/` 的 crate；任何 Monty API 变化都封装在此。
+- `langshell` 不得依赖 `langshell-monty` 或 `langshell-deno`；宿主必须通过 `LanguageRuntime` trait 显式组装所需后端。
 - `langshell-daemon` 只做协议序列化/反序列化与传输，不持有 session 状态。
 - `langshell-tools` 中的每个能力函数是一个独立模块，便于单独启用/禁用与单独审计。
-- CLI 和 SDK 共享 `langshell-core` + `langshell-monty` + `langshell-tools`，不得互相依赖。
+- CLI 作为宿主可依赖并组装 `langshell-monty` / `langshell-deno`；SDK 仅依赖 `langshell-core` + `langshell-tools`，二者不得互相依赖。
 
 ## 14. 关键数据结构（Rust 契约）
 

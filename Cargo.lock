@@ -1548,11 +1548,9 @@ dependencies = [
 
 [[package]]
 name = "langshell"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "langshell-core",
- "langshell-deno",
- "langshell-monty",
  "langshell-tools",
  "serde_json",
  "tokio",
@@ -1560,11 +1558,13 @@ dependencies = [
 
 [[package]]
 name = "langshell-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "clap",
  "langshell",
+ "langshell-deno",
+ "langshell-monty",
  "serde",
  "serde_json",
  "tokio",
@@ -1572,7 +1572,7 @@ dependencies = [
 
 [[package]]
 name = "langshell-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1581,12 +1581,13 @@ dependencies = [
 
 [[package]]
 name = "langshell-deno"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "deno_ast",
  "deno_core",
  "deno_error",
  "futures",
+ "langshell",
  "langshell-core",
  "serde",
  "serde_json",
@@ -1596,9 +1597,10 @@ dependencies = [
 
 [[package]]
 name = "langshell-monty"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures",
+ "langshell",
  "langshell-core",
  "monty",
  "serde",
@@ -1608,7 +1610,7 @@ dependencies = [
 
 [[package]]
 name = "langshell-tools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "langshell-core",
  "serde_json",

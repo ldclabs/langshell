@@ -10,6 +10,8 @@ use clap::{Args, Parser, Subcommand};
 use langshell::{
     ErrorObject, LangShell, Language, RunRequest, RunResult, RunStatus, SessionId, SessionLimits,
 };
+use langshell_deno::DenoRuntime;
+use langshell_monty::MontyRuntime;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
@@ -492,7 +494,10 @@ fn string_param(params: &Value, key: &str) -> Option<String> {
 }
 
 fn default_shell() -> Result<LangShell, ErrorObject> {
-    LangShell::builder().build()
+    LangShell::builder()
+        .runtime(MontyRuntime::new)
+        .runtime(DenoRuntime::new)
+        .build()
 }
 
 async fn load_session_if_exists(shell: &LangShell, session_id: &str) -> Result<(), ErrorObject> {

@@ -12,5 +12,5 @@ keywords = ["ai", "agents", "sandbox", "tools", "filesystem"]
 categories = ["api-bindings", "development-tools"]
 
 [dependencies]
-langshell-core = { path = "../langshell-core", version = "0.1" }
+langshell-core = { path = "../langshell-core", version = "0.2" }
 serde_json = { workspace = true }

@@ -7,7 +7,7 @@ bash examples/cli_single.sh
 bash examples/session_reuse.sh
 bash examples/validate_denied.sh
 bash examples/snapshot_restore.sh
-cargo run -q -p langshell --example sdk_async_fanout
+cargo run -q -p langshell-monty --example sdk_async_fanout
 ```
 
 The daemon example is line-delimited JSON-RPC over a Unix socket. Start the daemon:

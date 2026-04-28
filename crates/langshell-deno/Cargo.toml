@@ -13,7 +13,7 @@ keywords = ["ai", "agents", "sandbox", "typescript", "deno"]
 categories = ["asynchronous", "development-tools"]
 
 [dependencies]
-langshell-core = { path = "../langshell-core", version = "0.1" }
+langshell-core = { path = "../langshell-core", version = "0.2" }
 deno_ast = { version = "=0.53.1", features = ["transpiling"] }
 deno_core = { version = "0.399.0" }
 deno_error = "=0.7.1"
@@ -22,3 +22,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_v8 = { version = "0.308.0" }
 tokio = { workspace = true }
+
+[dev-dependencies]
+langshell = { path = "../langshell", version = "0.2" }

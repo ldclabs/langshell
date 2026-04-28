@@ -13,9 +13,12 @@ keywords = ["ai", "agents", "sandbox", "python", "monty"]
 categories = ["asynchronous", "development-tools"]
 
 [dependencies]
-langshell-core = { path = "../langshell-core", version = "0.1" }
+langshell-core = { path = "../langshell-core", version = "0.2" }
 futures = { workspace = true }
 monty = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+langshell = { path = "../langshell", version = "0.2" }

@@ -5,8 +5,9 @@ use std::{
 
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use langshell_core::{
-    CallStatus, ErrorObject, ExternalCallRecord, Language, Metrics, RunRequest, RunResult,
-    RunStatus, SessionId, SessionLimits, ToolCallContext, ToolRegistry, digest_bytes, digest_json,
+    CallStatus, ErrorObject, ExternalCallRecord, Language, LanguageRuntime, Metrics, RunRequest,
+    RunResult, RunStatus, RuntimeFuture, SessionId, SessionLimits, ToolCallContext, ToolRegistry,
+    digest_bytes, digest_json,
 };
 use monty::{
     ExcType, ExtFunctionResult, JsonMontyObject, LimitedTracker, MontyException, MontyObject,
@@ -15,6 +16,21 @@ use monty::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex;
+
+pub const MONTY_SNAPSHOT_MAGIC: &str = "langshell-snapshot/v1";
+
+pub fn is_monty_snapshot(snapshot: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(snapshot)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("magic")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some(MONTY_SNAPSHOT_MAGIC)
+}
 
 #[derive(Debug)]
 pub struct MontyRuntime {
@@ -197,6 +213,57 @@ impl MontyRuntime {
     }
 }
 
+impl LanguageRuntime for MontyRuntime {
+    fn language(&self) -> Language {
+        Language::Python
+    }
+
+    fn create_session(
+        &self,
+        session_id: SessionId,
+        limits: Option<SessionLimits>,
+    ) -> RuntimeFuture<'_, Result<(), ErrorObject>> {
+        Box::pin(async move {
+            MontyRuntime::create_session(self, session_id, limits).await;
+            Ok(())
+        })
+    }
+
+    fn run(&self, request: RunRequest) -> RuntimeFuture<'_, RunResult> {
+        Box::pin(async move { MontyRuntime::run(self, request).await })
+    }
+
+    fn destroy_session(
+        &self,
+        session_id: SessionId,
+    ) -> RuntimeFuture<'_, Result<bool, ErrorObject>> {
+        Box::pin(async move { Ok(MontyRuntime::destroy_session(self, &session_id).await) })
+    }
+
+    fn list_sessions(&self) -> RuntimeFuture<'_, Result<Vec<SessionId>, ErrorObject>> {
+        Box::pin(async move { Ok(MontyRuntime::list_sessions(self).await) })
+    }
+
+    fn snapshot_session(
+        &self,
+        session_id: SessionId,
+    ) -> RuntimeFuture<'_, Result<Vec<u8>, ErrorObject>> {
+        Box::pin(async move { MontyRuntime::snapshot_session(self, &session_id).await })
+    }
+
+    fn restore_session(
+        &self,
+        snapshot: Vec<u8>,
+        session_id: Option<SessionId>,
+    ) -> RuntimeFuture<'_, Result<SessionId, ErrorObject>> {
+        Box::pin(async move { MontyRuntime::restore_session(self, &snapshot, session_id).await })
+    }
+
+    fn can_restore_snapshot(&self, snapshot: &[u8]) -> bool {
+        is_monty_snapshot(snapshot)
+    }
+}
+
 #[derive(Debug)]
 struct MontySession {
     id: SessionId,
@@ -225,7 +292,7 @@ struct SnapshotEnvelope {
     capability_digest: String,
 }
 
-const SNAPSHOT_MAGIC: &str = "langshell-snapshot/v1";
+const SNAPSHOT_MAGIC: &str = MONTY_SNAPSHOT_MAGIC;
 
 async fn run_session(
     mut session: MontySession,

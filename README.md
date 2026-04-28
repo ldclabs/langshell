@@ -15,9 +15,9 @@ This repository contains a working MVP of the core LangShell flow, not just crat
 - `langshell-core` defines the stable data contracts for sessions, tools, diagnostics, errors, and snapshots.
 - `langshell-monty` runs Python-subset code in persistent Monty sessions, supports validation, captures `result` and final-expression values, and records external calls.
 - `langshell-tools` registers discovery tools plus opt-in file and HTTP capability helpers for hosts.
-- `langshell` exposes a Rust SDK builder for mounts, allowlists, and custom sync or async capabilities.
+- `langshell` exposes a backend-neutral Rust SDK builder for mounts, allowlists, custom sync or async capabilities, and host-selected language runtimes.
 - `langshell-cli` provides `run`, `validate`, `repl`, `daemon`, `session`, and `tools` commands with stable JSON output.
-- End-to-end scripts and SDK coverage live under [examples/README.md](./examples/README.md) and `crates/langshell/tests`.
+- End-to-end scripts and SDK coverage live under [examples/README.md](./examples/README.md), `crates/langshell/tests`, and backend crate tests.
 
 [AGENTS.md](AGENTS.md) remains the source of truth for product requirements and engineering contracts, and [SKILL.md](SKILL.md) describes how an AI agent should use LangShell safely.
 
@@ -67,7 +67,8 @@ The MVP also includes host-side helpers for controlled file and HTTP capability 
 
 ## Current Limitations
 
-- The executable backend is Python-only today; TypeScript and Deno remain future work.
+- The public `langshell` SDK no longer depends on concrete backend crates. Hosts choose and register a `LanguageRuntime`, such as `langshell-monty` for Python or `langshell-deno` for TypeScript.
+- `langshell-monty` remains unpublished until upstream `monty` is available on crates.io; the SDK can still be published independently.
 - File tools are only available when the host configures authorized mounts through the SDK builder.
 - The built-in HTTP helpers enforce allowlists and capability shape, but do not ship a real network transport in the default build. Hosts should register their own `fetch_text` or `fetch_json` handlers for live HTTP access.
 - The CLI daemon currently supports `unix://` listeners only.
@@ -82,24 +83,33 @@ Agent / Host App
 	+-- Rust SDK
 	        |
 	        v
-	  langshell-core
-	        |
-	 +------+-------+
-	 |              |
-	 v              v
-langshell-monty  langshell-tools
-	 |
-	 v
-	 Monty VM
+	  langshell SDK
+		 |
+	 +------+----------------+
+	 |                       |
+	 v                       v
+	langshell-tools      langshell-core
+				    |
+				    v
+			   LanguageRuntime trait
+				    |
+		+-----------------+-----------------+
+		|                                   |
+		v                                   v
+	langshell-monty                     langshell-deno
+		|                                   |
+		v                                   v
+	     Monty VM                           Deno/V8
 ```
 
 Responsibilities are split along these boundaries:
 
-- `langshell-core`: core abstractions, including the stable contracts for sessions, policy, registry, snapshots, and diagnostics.
+- `langshell-core`: core abstractions, including the stable contracts for sessions, policy, registry, snapshots, diagnostics, and the `LanguageRuntime` backend trait.
 - `langshell-monty`: the MVP execution backend that encapsulates all Monty-specific integration.
+- `langshell-deno`: the TypeScript execution backend that implements the same runtime trait.
 - `langshell-tools`: built-in capability modules such as file and HTTP tools.
 - `langshell-cli`: the developer-facing command-line entry point, intended to host commands such as run, validate, repl, daemon, session, and tools.
-- `langshell`: the public Rust SDK for hosts to integrate the runtime, register capabilities, and initiate execution.
+- `langshell`: the public Rust SDK for hosts to register capabilities, select runtime backends, and initiate execution without depending on concrete engines.
 
 ## Crates
 
@@ -107,20 +117,20 @@ Responsibilities are split along these boundaries:
 | ----------------- | --------------------------------------------------------------------------------------------------------------- |
 | `langshell-core`  | Stable Rust and JSON-facing contracts for sessions, capabilities, diagnostics, metrics, and snapshots.          |
 | `langshell-monty` | Monty-backed runtime implementation with persistent sessions, validation, result capture, and snapshot support. |
+| `langshell-deno`  | Deno-backed TypeScript runtime implementation with persistent sessions and snapshot support.                    |
 | `langshell-tools` | Built-in discovery tools and host-configurable file and HTTP capability helpers.                                |
-| `langshell`       | Public Rust SDK for building runtimes, configuring policy, and registering sync or async capabilities.          |
+| `langshell`       | Public Rust SDK for configuring policy, registering capabilities, and composing selected runtime backends.      |
 | `langshell-cli`   | CLI binary and line-delimited JSON-RPC daemon for running code and inspecting sessions.                         |
 
 ## Repository Layout
 
 ```text
 langshell/
-├── monty/                  # upstream execution engine submodule
-├── deno/                   # future TypeScript / Deno backend submodule
 ├── crates/
 │   ├── langshell/
 │   ├── langshell-cli/
 │   ├── langshell-core/
+│   ├── langshell-deno/
 │   ├── langshell-monty/
 │   └── langshell-tools/
 ├── docs/
@@ -162,6 +172,19 @@ cargo run -q -p langshell-cli --bin langshell -- daemon --listen unix:///tmp/lan
 ```
 
 The repository also includes shell scripts for the acceptance flows in [examples/README.md](./examples/README.md).
+
+### Rust SDK Backend Assembly
+
+The SDK crate is publishable on its own. A host application chooses the concrete backend crate and registers it with the builder:
+
+```rust
+use langshell::LangShell;
+use langshell_monty::MontyRuntime;
+
+let shell = LangShell::builder()
+	.runtime(MontyRuntime::new)
+	.build()?;
+```
 
 ### JSON-RPC Request Shape
 
@@ -231,7 +254,7 @@ bash examples/cli_single.sh
 bash examples/session_reuse.sh
 bash examples/validate_denied.sh
 bash examples/snapshot_restore.sh
-cargo run -q -p langshell --example sdk_async_fanout
+cargo run -q -p langshell-monty --example sdk_async_fanout
 ```
 
 To start the daemon manually:

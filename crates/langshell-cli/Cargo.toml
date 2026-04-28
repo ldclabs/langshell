@@ -14,7 +14,9 @@ categories = ["command-line-utilities", "development-tools"]
 default-run = "langshell"
 
 [dependencies]
-langshell = { path = "../langshell", version = "0.1" }
+langshell = { path = "../langshell", version = "0.2" }
+langshell-deno = { path = "../langshell-deno", version = "0.2" }
+langshell-monty = { path = "../langshell-monty", version = "0.2" }
 base64 = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }

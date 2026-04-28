@@ -1,9 +1,13 @@
 use langshell::{LangShell, RunStatus, SideEffect};
+use langshell_deno::DenoRuntime;
 use serde_json::{Value, json};
 
 #[tokio::test]
 async fn sdk_runs_typescript_session_state() {
-    let shell = LangShell::builder().build().unwrap();
+    let shell = LangShell::builder()
+        .runtime(DenoRuntime::new)
+        .build()
+        .unwrap();
 
     let first = shell
         .typescript_session("ts-sdk-state")
@@ -24,6 +28,7 @@ async fn sdk_runs_typescript_session_state() {
 #[tokio::test]
 async fn sdk_typescript_awaits_registered_tool() {
     let shell = LangShell::builder()
+        .runtime(DenoRuntime::new)
         .register_async(
             "fetch_json",
             "Test fetch_json capability.",

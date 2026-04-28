@@ -14,8 +14,9 @@ use deno_ast::{MediaType, ParseParams, SourceMapOption};
 use deno_core::{Extension, JsRuntime, OpState, PollEventLoopOptions, RuntimeOptions, op2, v8};
 use deno_error::JsErrorBox;
 use langshell_core::{
-    CallStatus, ErrorObject, ExternalCallRecord, Language, Metrics, RunRequest, RunResult,
-    RunStatus, SessionId, SessionLimits, ToolCallContext, ToolRegistry, digest_bytes, digest_json,
+    CallStatus, ErrorObject, ExternalCallRecord, Language, LanguageRuntime, Metrics, RunRequest,
+    RunResult, RunStatus, RuntimeFuture, SessionId, SessionLimits, ToolCallContext, ToolRegistry,
+    digest_bytes, digest_json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -107,6 +108,54 @@ impl DenoRuntime {
 
     fn send(&self, command: DenoCommand) -> Result<(), ErrorObject> {
         self.tx.send(command).map_err(|_| worker_closed_error())
+    }
+}
+
+impl LanguageRuntime for DenoRuntime {
+    fn language(&self) -> Language {
+        Language::TypeScript
+    }
+
+    fn create_session(
+        &self,
+        session_id: SessionId,
+        limits: Option<SessionLimits>,
+    ) -> RuntimeFuture<'_, Result<(), ErrorObject>> {
+        Box::pin(async move { DenoRuntime::create_session(self, session_id, limits).await })
+    }
+
+    fn run(&self, request: RunRequest) -> RuntimeFuture<'_, RunResult> {
+        Box::pin(async move { DenoRuntime::run(self, request).await })
+    }
+
+    fn destroy_session(
+        &self,
+        session_id: SessionId,
+    ) -> RuntimeFuture<'_, Result<bool, ErrorObject>> {
+        Box::pin(async move { DenoRuntime::destroy_session(self, &session_id).await })
+    }
+
+    fn list_sessions(&self) -> RuntimeFuture<'_, Result<Vec<SessionId>, ErrorObject>> {
+        Box::pin(async move { DenoRuntime::list_sessions(self).await })
+    }
+
+    fn snapshot_session(
+        &self,
+        session_id: SessionId,
+    ) -> RuntimeFuture<'_, Result<Vec<u8>, ErrorObject>> {
+        Box::pin(async move { DenoRuntime::snapshot_session(self, &session_id).await })
+    }
+
+    fn restore_session(
+        &self,
+        snapshot: Vec<u8>,
+        session_id: Option<SessionId>,
+    ) -> RuntimeFuture<'_, Result<SessionId, ErrorObject>> {
+        Box::pin(async move { DenoRuntime::restore_session(self, &snapshot, session_id).await })
+    }
+
+    fn can_restore_snapshot(&self, snapshot: &[u8]) -> bool {
+        is_deno_snapshot(snapshot)
     }
 }
 
