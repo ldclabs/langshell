@@ -1,0 +1,24 @@
+[package]
+name = "langshell-deno"
+description = "Deno-backed LangShell runtime for sandboxed TypeScript execution."
+publish = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/langshell-deno"
+keywords = ["ai", "agents", "sandbox", "typescript", "deno"]
+categories = ["asynchronous", "development-tools"]
+
+[dependencies]
+langshell-core = { path = "../langshell-core", version = "0.1" }
+deno_ast = { version = "=0.53.1", features = ["transpiling"] }
+deno_core = { version = "0.399.0" }
+deno_error = "=0.7.1"
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_v8 = { version = "0.308.0" }
+tokio = { workspace = true }

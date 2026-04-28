@@ -52,7 +52,6 @@ pub enum Language {
     TypeScript,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionLimits {
     pub memory_mb: u32,
@@ -112,7 +111,6 @@ pub enum SideEffect {
     ExternalSystem,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityLimits {
     pub timeout_ms: u32,
@@ -140,10 +138,11 @@ impl Default for CapabilityLimits {
 pub enum ApprovalPolicy {
     #[default]
     None,
-    Auto { rule: String },
+    Auto {
+        rule: String,
+    },
     Manual,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Capability {
@@ -237,7 +236,6 @@ pub enum RunStatus {
     Interrupted,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
@@ -247,7 +245,6 @@ pub enum Severity {
     #[default]
     Info,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
@@ -301,7 +298,6 @@ pub enum CallStatus {
     ApprovalPending,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorObject {
     pub code: String,
@@ -342,15 +338,13 @@ pub struct ExternalCallRecord {
     pub error: Option<ErrorObject>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Metrics {
     pub duration_ms: u32,
     pub memory_peak_bytes: u64,
     pub instructions: u64,
     pub external_calls_count: u32,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunResult {

@@ -14,6 +14,7 @@ categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
 langshell-core = { path = "../langshell-core", version = "0.1" }
+langshell-deno = { path = "../langshell-deno", version = "0.1" }
 langshell-monty = { path = "../langshell-monty", version = "0.1" }
 langshell-tools = { path = "../langshell-tools", version = "0.1" }
 serde_json = { workspace = true }

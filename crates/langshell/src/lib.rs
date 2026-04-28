@@ -3,12 +3,14 @@ use std::{future::Future, path::PathBuf, sync::Arc};
 pub use langshell_core::*;
 pub use langshell_tools::{FileMount, ToolConfig};
 
+use langshell_deno::{DenoRuntime, is_deno_snapshot};
 use langshell_monty::MontyRuntime;
 use serde_json::{Map, Value};
 
 #[derive(Debug, Clone)]
 pub struct LangShell {
-    runtime: Arc<MontyRuntime>,
+    monty: Arc<MontyRuntime>,
+    deno: Arc<DenoRuntime>,
 }
 
 impl LangShell {
@@ -17,49 +19,101 @@ impl LangShell {
     }
 
     pub async fn run(&self, request: RunRequest) -> RunResult {
-        self.runtime.run(request).await
+        match request.language {
+            Language::Python => self.monty.run(request).await,
+            Language::TypeScript => self.deno.run(request).await,
+        }
     }
 
     pub async fn validate(&self, mut request: RunRequest) -> RunResult {
         request.validate_only = true;
-        self.runtime.run(request).await
+        self.run(request).await
     }
 
     pub fn session(&self, session_id: impl Into<String>) -> SessionHandle {
+        self.session_with_language(session_id, Language::Python)
+    }
+
+    pub fn typescript_session(&self, session_id: impl Into<String>) -> SessionHandle {
+        self.session_with_language(session_id, Language::TypeScript)
+    }
+
+    pub fn session_with_language(
+        &self,
+        session_id: impl Into<String>,
+        language: Language,
+    ) -> SessionHandle {
         SessionHandle {
-            runtime: self.runtime.clone(),
+            shell: self.clone(),
             session_id: session_id.into(),
+            language,
         }
     }
 
     pub async fn create_session(&self, session_id: impl Into<String>) -> Result<(), ErrorObject> {
-        self.runtime
-            .create_session(SessionId::new(session_id)?, None)
-            .await;
-        Ok(())
+        self.create_session_with_language(session_id, Language::Python)
+            .await
+    }
+
+    pub async fn create_session_with_language(
+        &self,
+        session_id: impl Into<String>,
+        language: Language,
+    ) -> Result<(), ErrorObject> {
+        let session_id = SessionId::new(session_id)?;
+        match language {
+            Language::Python => {
+                self.monty.create_session(session_id, None).await;
+                Ok(())
+            }
+            Language::TypeScript => self.deno.create_session(session_id, None).await,
+        }
     }
 
     pub async fn list_sessions(&self) -> Vec<SessionId> {
-        self.runtime.list_sessions().await
+        let mut ids = self.monty.list_sessions().await;
+        if let Ok(deno_ids) = self.deno.list_sessions().await {
+            ids.extend(deno_ids);
+        }
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        ids.dedup_by(|a, b| a.0 == b.0);
+        ids
     }
 
     pub async fn destroy_session(
         &self,
         session_id: impl Into<String>,
     ) -> Result<bool, ErrorObject> {
-        Ok(self
-            .runtime
-            .destroy_session(&SessionId::new(session_id)?)
-            .await)
+        let session_id = SessionId::new(session_id)?;
+        let removed_python = self.monty.destroy_session(&session_id).await;
+        let removed_typescript = self.deno.destroy_session(&session_id).await?;
+        Ok(removed_python || removed_typescript)
     }
 
     pub async fn snapshot_session(
         &self,
         session_id: impl Into<String>,
     ) -> Result<Vec<u8>, ErrorObject> {
-        self.runtime
-            .snapshot_session(&SessionId::new(session_id)?)
-            .await
+        let session_id = SessionId::new(session_id)?;
+        match self.monty.snapshot_session(&session_id).await {
+            Ok(snapshot) => Ok(snapshot),
+            Err(error) if error.code == "SESSION_NOT_FOUND" => {
+                self.deno.snapshot_session(&session_id).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub async fn snapshot_session_with_language(
+        &self,
+        session_id: impl Into<String>,
+        language: Language,
+    ) -> Result<Vec<u8>, ErrorObject> {
+        let session_id = SessionId::new(session_id)?;
+        match language {
+            Language::Python => self.monty.snapshot_session(&session_id).await,
+            Language::TypeScript => self.deno.snapshot_session(&session_id).await,
+        }
     }
 
     pub async fn restore_session(
@@ -68,23 +122,36 @@ impl LangShell {
         session_id: Option<impl Into<String>>,
     ) -> Result<SessionId, ErrorObject> {
         let session_id = session_id.map(|id| SessionId::new(id.into())).transpose()?;
-        self.runtime.restore_session(snapshot, session_id).await
+        if is_deno_snapshot(snapshot) {
+            self.deno.restore_session(snapshot, session_id).await
+        } else {
+            self.monty.restore_session(snapshot, session_id).await
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct SessionHandle {
-    runtime: Arc<MontyRuntime>,
+    shell: LangShell,
     session_id: String,
+    language: Language,
 }
 
 impl SessionHandle {
+    pub fn with_language(&self, language: Language) -> Self {
+        Self {
+            shell: self.shell.clone(),
+            session_id: self.session_id.clone(),
+            language,
+        }
+    }
+
     pub fn run(&self, code: impl Into<String>) -> RunBuilder {
         RunBuilder {
-            runtime: self.runtime.clone(),
+            shell: self.shell.clone(),
             request: RunRequest {
                 session_id: SessionId(self.session_id.clone()),
-                language: Language::Python,
+                language: self.language,
                 code: code.into(),
                 inputs: Map::new(),
                 timeout_ms: None,
@@ -104,7 +171,7 @@ impl SessionHandle {
 
 #[derive(Debug, Clone)]
 pub struct RunBuilder {
-    runtime: Arc<MontyRuntime>,
+    shell: LangShell,
     request: RunRequest,
 }
 
@@ -130,7 +197,7 @@ impl RunBuilder {
     }
 
     pub async fn execute(self) -> RunResult {
-        self.runtime.run(self.request).await
+        self.shell.run(self.request).await
     }
 }
 
@@ -239,8 +306,11 @@ impl LangShellBuilder {
                 http_allowlist: self.http_allowlist,
             },
         )?;
+        let registry = self.registry;
+        let limits = self.limits;
         Ok(LangShell {
-            runtime: Arc::new(MontyRuntime::new(self.registry, self.limits)),
+            monty: Arc::new(MontyRuntime::new(registry.clone(), limits.clone())),
+            deno: Arc::new(DenoRuntime::new(registry, limits)),
         })
     }
 }

@@ -21,7 +21,7 @@ use tokio::{
 #[command(
     name = "langshell",
     version,
-    about = "Stateful sandboxed Python execution for AI agents"
+    about = "Stateful sandboxed Python and TypeScript execution for AI agents"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -48,6 +48,8 @@ struct RunCommand {
     session_id: String,
     #[arg(long = "timeout")]
     timeout_ms: Option<u32>,
+    #[arg(long = "language", default_value = "python")]
+    language: String,
     #[arg(long = "json", default_value_t = false)]
     json: bool,
 }
@@ -140,13 +142,15 @@ async fn run_code(command: RunCommand, validate_only: bool) -> Result<ExitCode, 
     if !validate_only {
         load_session_if_exists(&shell, &command.session_id).await?;
     }
+    let language = parse_language(&command.language)?;
     let code = read_code(&command)?;
     let mut request = RunRequest::new(&command.session_id, code)?;
+    request.language = language;
     request.validate_only = validate_only;
     request.timeout_ms = command.timeout_ms;
     let result = shell.run(request).await;
     if !validate_only && result.status == RunStatus::Ok {
-        save_session(&shell, &command.session_id).await?;
+        save_session(&shell, &command.session_id, language).await?;
     }
     print_json(&result)?;
     Ok(if result.status == RunStatus::Ok {
@@ -179,7 +183,7 @@ async fn run_repl(command: ReplCommand) -> Result<ExitCode, ErrorObject> {
             .await;
         print_json(&result)?;
         if result.status == RunStatus::Ok {
-            save_session(&shell, &command.session_id).await?;
+            save_session(&shell, &command.session_id, Language::Python).await?;
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -207,7 +211,7 @@ async fn run_session_command(command: SessionCommand) -> Result<ExitCode, ErrorO
             shell
                 .restore_session(&bytes, Some(session_id.clone()))
                 .await?;
-            save_session(&shell, &session_id).await?;
+            save_any_session(&shell, &session_id).await?;
             print_json(&json!({"status": "ok", "session_id": session_id}))?;
         }
         SessionAction::Destroy { session_id } => {
@@ -504,7 +508,24 @@ async fn load_session_if_exists(shell: &LangShell, session_id: &str) -> Result<(
     Ok(())
 }
 
-async fn save_session(shell: &LangShell, session_id: &str) -> Result<(), ErrorObject> {
+async fn save_session(
+    shell: &LangShell,
+    session_id: &str,
+    language: Language,
+) -> Result<(), ErrorObject> {
+    let bytes = shell
+        .snapshot_session_with_language(session_id, language)
+        .await?;
+    let path = session_file(session_id)?;
+    let parent = path.parent().expect("session file has parent");
+    fs::create_dir_all(parent).map_err(|err| {
+        ErrorObject::new("IO_ERROR", format!("creating {}: {err}", parent.display()))
+    })?;
+    fs::write(&path, bytes)
+        .map_err(|err| ErrorObject::new("IO_ERROR", format!("writing {}: {err}", path.display())))
+}
+
+async fn save_any_session(shell: &LangShell, session_id: &str) -> Result<(), ErrorObject> {
     let bytes = shell.snapshot_session(session_id).await?;
     let path = session_file(session_id)?;
     let parent = path.parent().expect("session file has parent");
@@ -547,6 +568,17 @@ fn session_dir() -> PathBuf {
     std::env::var_os("LANGSHELL_SESSION_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("langshell").join("sessions"))
+}
+
+fn parse_language(language: &str) -> Result<Language, ErrorObject> {
+    match language {
+        "python" | "Python" => Ok(Language::Python),
+        "typescript" | "TypeScript" | "ts" | "TS" => Ok(Language::TypeScript),
+        other => Err(ErrorObject::new(
+            "UNSUPPORTED_FEATURE",
+            format!("Language {other} is not supported."),
+        )),
+    }
 }
 
 fn read_code(command: &RunCommand) -> Result<String, ErrorObject> {
