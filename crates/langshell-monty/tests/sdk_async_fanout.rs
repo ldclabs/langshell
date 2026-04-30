@@ -10,6 +10,8 @@ async fn sdk_registered_async_fetch_json_fans_out() {
             "fetch_json",
             "Test fetch_json capability.",
             SideEffect::Network,
+            json!({"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 1}),
+            json!({"type": "object", "properties": {"url": {"type": "string"}, "ok": {"type": "boolean"}}, "required": ["url", "ok"]}),
             |ctx| async move {
                 let url = ctx.args.first().and_then(Value::as_str).unwrap_or_default();
                 Ok(json!({"url": url, "ok": true}))

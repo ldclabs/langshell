@@ -1,13 +1,9 @@
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
-
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use ic_auth_types::deterministic_cbor_into;
 use langshell_core::{
-    CallStatus, ErrorObject, ExternalCallRecord, Language, LanguageRuntime, Metrics, RunRequest,
-    RunResult, RunStatus, RuntimeFuture, SessionId, SessionLimits, ToolCallContext, ToolRegistry,
-    digest_bytes, digest_json,
+    CallStatus, Diagnostic, ErrorObject, ExternalCallRecord, Language, LanguageRuntime, Metrics,
+    RunRequest, RunResult, RunStatus, RuntimeFuture, SessionId, SessionLimits, ToolCallContext,
+    ToolRegistry, digest_bytes, digest_json, truncate_utf8,
 };
 use monty::{
     ExcType, ExtFunctionResult, JsonMontyObject, LimitedTracker, MontyException, MontyObject,
@@ -15,21 +11,24 @@ use monty::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 use tokio::sync::Mutex;
 
-pub const MONTY_SNAPSHOT_MAGIC: &str = "langshell-snapshot/v1";
+pub const MONTY_SNAPSHOT_MAGIC: &str = "langshell-monty-snapshot/v1";
 
 pub fn is_monty_snapshot(snapshot: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(snapshot)
+    ciborium::from_reader::<SnapshotPeek, _>(snapshot)
         .ok()
-        .and_then(|value| {
-            value
-                .get("magic")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .as_deref()
-        == Some(MONTY_SNAPSHOT_MAGIC)
+        .map(|peek| peek.magic == MONTY_SNAPSHOT_MAGIC)
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Deserialize)]
+struct SnapshotPeek {
+    magic: String,
 }
 
 #[derive(Debug)]
@@ -62,7 +61,7 @@ impl MontyRuntime {
                 RunStatus::ValidationError,
                 ErrorObject::new(
                     "UNSUPPORTED_FEATURE",
-                    "Only the Python backend is available in the MVP.",
+                    "The Monty runtime only executes Python.",
                 ),
                 String::new(),
                 Metrics::default(),
@@ -158,12 +157,14 @@ impl MontyRuntime {
             repl_dump,
             capability_digest: capability_digest(&self.registry),
         };
-        serde_json::to_vec(&snapshot).map_err(|err| {
+        let mut buf = Vec::with_capacity(snapshot.repl_dump.len() + 256);
+        deterministic_cbor_into(&snapshot, &mut buf).map_err(|err| {
             ErrorObject::new(
                 "SNAPSHOT_CORRUPT",
                 format!("Failed to serialize snapshot: {err}"),
             )
-        })
+        })?;
+        Ok(buf)
     }
 
     pub async fn restore_session(
@@ -171,7 +172,7 @@ impl MontyRuntime {
         snapshot: &[u8],
         session_id: Option<SessionId>,
     ) -> Result<SessionId, ErrorObject> {
-        let snapshot: SnapshotEnvelope = serde_json::from_slice(snapshot).map_err(|err| {
+        let snapshot: SnapshotEnvelope = ciborium::from_reader(snapshot).map_err(|err| {
             ErrorObject::new("SNAPSHOT_CORRUPT", format!("Invalid snapshot: {err}"))
         })?;
         if snapshot.magic != SNAPSHOT_MAGIC {
@@ -430,15 +431,19 @@ async fn run_session(
             };
 
             session.repl = next_repl;
+            let (stdout, stdout_diag) = truncate_stdout(stdout, &session.limits);
             let mut result = RunResult::ok(
                 result_value,
-                truncate_stdout(stdout, &session.limits),
+                stdout,
                 metrics(
                     started,
                     session.repl.tracker().current_memory() as u64,
                     records.len() as u32,
                 ),
             );
+            if let Some(diagnostic) = stdout_diag {
+                result.diagnostics.push(diagnostic);
+            }
             result.external_calls = records;
             if request.return_snapshot {
                 result.snapshot_id =
@@ -453,16 +458,20 @@ async fn run_session(
             records,
         } => {
             session.repl = repl;
+            let (stdout, stdout_diag) = truncate_stdout(stdout, &session.limits);
             let mut result = RunResult::error(
                 code_to_status(&error.code, false),
                 error,
-                truncate_stdout(stdout, &session.limits),
+                stdout,
                 metrics(
                     started,
                     session.repl.tracker().current_memory() as u64,
                     records.len() as u32,
                 ),
             );
+            if let Some(diagnostic) = stdout_diag {
+                result.diagnostics.push(diagnostic);
+            }
             result.external_calls = records;
             (session, result)
         }
@@ -791,7 +800,7 @@ fn effective_limits(default_limits: &SessionLimits, request: &RunRequest) -> Ses
 fn resource_limits(limits: &SessionLimits) -> ResourceLimits {
     ResourceLimits::new()
         .max_duration(Duration::from_millis(u64::from(limits.wall_ms)))
-        .max_memory(limits.memory_mb as usize * 1024 * 1024)
+        .max_memory((limits.memory_mb as usize).saturating_mul(1024 * 1024))
         .max_recursion_depth(Some(usize::from(limits.max_stack_depth)))
 }
 
@@ -937,55 +946,177 @@ fn code_to_status(code: &str, validation: bool) -> RunStatus {
     }
 }
 
+/// Modules that cannot be imported in the LangShell Python sandbox.
+const PY_BLOCKED_MODULES: &[&str] = &[
+    "os",
+    "subprocess",
+    "socket",
+    "urllib",
+    "requests",
+    "ctypes",
+    "sys",
+    "shutil",
+    "pathlib",
+    "io",
+    "multiprocessing",
+    "threading",
+    "http",
+];
+
+/// Dunder attributes that allow sandbox escape via class hierarchy walks.
+const PY_BLOCKED_ATTRS: &[&str] = &[
+    "__class__",
+    "__bases__",
+    "__subclasses__",
+    "__mro__",
+    "__globals__",
+    "__builtins__",
+    "__import__",
+];
+
+/// Free-functions that look like external capabilities; flagged when not registered.
+const PY_SUSPICIOUS_NAMES: &[&str] = &["fetch_url", "query_db", "send_email"];
+
+/// Top-level builtins that can break the sandbox; always disallowed.
+const PY_BANNED_BUILTINS: &[&str] = &["open", "exec", "eval", "compile", "__import__"];
+
 fn static_validation_error(code: &str, registry: &ToolRegistry) -> Option<ErrorObject> {
-    let unsupported = [
-        "open(",
-        "import os",
-        "from os",
-        "os.system",
-        "subprocess",
-        "import socket",
-        "from socket",
-        "import urllib",
-        "from urllib",
-        "import requests",
-        "__class__",
-        "__bases__",
-        "__subclasses__",
-    ];
-    unsupported
-        .iter()
-        .find(|pattern| code.contains(**pattern))
-        .map(|pattern| {
-            ErrorObject::new(
-                "UNSUPPORTED_FEATURE",
-                format!("Use of {pattern:?} is not supported in the LangShell sandbox."),
-            )
-            .with_hint(
-                "Use a registered capability such as read_text, fetch_json, or list_tools instead.",
-            )
-        })
-        .or_else(|| {
-            let suspicious = ["fetch_url", "query_db", "send_email"];
-            suspicious
-                .iter()
-                .find(|name| code.contains(&format!("{name}(")) && !registry.contains(name))
-                .map(|name| {
-                    ErrorObject::new(
-                        "UNKNOWN_TOOL",
-                        format!("Function {name} is not registered in this session."),
-                    )
-                    .with_hint("Call list_tools() to inspect available capabilities.")
-                })
-        })
+    use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
+    use ruff_python_ast::{Expr, Stmt};
+
+    let parsed = match ruff_python_parser::parse_module(code) {
+        Ok(parsed) => parsed,
+        // Let MontyRun produce a precise SYNTAX_ERROR for unparseable code.
+        Err(_) => return None,
+    };
+
+    struct V<'r> {
+        registry: &'r ToolRegistry,
+        error: Option<ErrorObject>,
+    }
+
+    impl<'r> V<'r> {
+        fn flag_unsupported(&mut self, what: &str) {
+            if self.error.is_some() {
+                return;
+            }
+            self.error = Some(
+                ErrorObject::new(
+                    "UNSUPPORTED_FEATURE",
+                    format!("Use of {what:?} is not supported in the LangShell sandbox."),
+                )
+                .with_hint(
+                    "Use a registered capability such as read_text, fetch_json, or list_tools instead.",
+                ),
+            );
+        }
+
+        fn flag_unknown_tool(&mut self, name: &str) {
+            if self.error.is_some() {
+                return;
+            }
+            self.error = Some(
+                ErrorObject::new(
+                    "UNKNOWN_TOOL",
+                    format!("Function {name} is not registered in this session."),
+                )
+                .with_hint("Call list_tools() to inspect available capabilities."),
+            );
+        }
+    }
+
+    impl<'a, 'r> Visitor<'a> for V<'r> {
+        fn visit_stmt(&mut self, stmt: &'a Stmt) {
+            if self.error.is_some() {
+                return;
+            }
+            match stmt {
+                Stmt::Import(node) => {
+                    for alias in &node.names {
+                        let name = alias.name.id.as_str();
+                        let head = name.split('.').next().unwrap_or(name);
+                        if PY_BLOCKED_MODULES.contains(&head) {
+                            self.flag_unsupported(&format!("import {name}"));
+                            return;
+                        }
+                    }
+                }
+                Stmt::ImportFrom(node) => {
+                    if let Some(module) = node.module.as_ref() {
+                        let name = module.id.as_str();
+                        let head = name.split('.').next().unwrap_or(name);
+                        if PY_BLOCKED_MODULES.contains(&head) {
+                            self.flag_unsupported(&format!("from {name} import ..."));
+                            return;
+                        }
+                    } else if node.level > 0 {
+                        // Relative imports are unsupported in the sandbox.
+                        self.flag_unsupported("relative import");
+                        return;
+                    }
+                }
+                _ => {}
+            }
+            walk_stmt(self, stmt);
+        }
+
+        fn visit_expr(&mut self, expr: &'a Expr) {
+            if self.error.is_some() {
+                return;
+            }
+            match expr {
+                Expr::Attribute(attr) => {
+                    let name = attr.attr.id.as_str();
+                    if PY_BLOCKED_ATTRS.contains(&name) {
+                        self.flag_unsupported(name);
+                        return;
+                    }
+                }
+                Expr::Call(call) => {
+                    if let Expr::Name(callee) = call.func.as_ref() {
+                        let name = callee.id.as_str();
+                        if PY_BANNED_BUILTINS.contains(&name) {
+                            self.flag_unsupported(&format!("{name}(...)"));
+                            return;
+                        }
+                        if PY_SUSPICIOUS_NAMES.contains(&name) && !self.registry.contains(name) {
+                            self.flag_unknown_tool(name);
+                            return;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            walk_expr(self, expr);
+        }
+    }
+
+    let mut v = V {
+        registry,
+        error: None,
+    };
+    for stmt in &parsed.syntax().body {
+        v.visit_stmt(stmt);
+        if v.error.is_some() {
+            break;
+        }
+    }
+    v.error
 }
 
-fn truncate_stdout(mut stdout: String, limits: &SessionLimits) -> String {
-    let max = limits.max_stdout_bytes as usize;
-    if stdout.len() > max {
-        stdout.truncate(max);
-    }
-    stdout
+fn truncate_stdout(stdout: String, limits: &SessionLimits) -> (String, Option<Diagnostic>) {
+    let mut stdout = stdout;
+    let truncated = truncate_utf8(&mut stdout, limits.max_stdout_bytes as usize);
+    let diagnostic = truncated.then(|| {
+        Diagnostic::warning(
+            "STDOUT_EXCEEDED",
+            format!(
+                "stdout exceeded the {} byte limit and was truncated.",
+                limits.max_stdout_bytes
+            ),
+        )
+    });
+    (stdout, diagnostic)
 }
 
 fn metrics(started: Instant, memory_bytes: u64, external_calls_count: u32) -> Metrics {
@@ -1047,5 +1178,76 @@ result = {"n": len(data)}
         assert_eq!(result.status, RunStatus::Ok, "{result:?}");
         assert_eq!(result.result, Some(json!({"n": 3})));
         assert_eq!(result.metrics.external_calls_count, 3);
+    }
+
+    #[tokio::test]
+    async fn truncates_oversized_stdout_with_diagnostic() {
+        let limits = SessionLimits {
+            max_stdout_bytes: 16,
+            ..SessionLimits::default()
+        };
+        let runtime = MontyRuntime::new(ToolRegistry::new(), limits);
+        let result = runtime
+            .run(RunRequest::new("s1", "print('x' * 100)\nresult = 1").unwrap())
+            .await;
+        assert_eq!(result.status, RunStatus::Ok, "{result:?}");
+        assert!(result.stdout.len() <= 16);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "STDOUT_EXCEEDED"),
+            "expected STDOUT_EXCEEDED diagnostic, got {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[tokio::test]
+    async fn ast_validator_blocks_real_subprocess_import() {
+        let runtime = MontyRuntime::new(ToolRegistry::new(), SessionLimits::default());
+        let result = runtime
+            .run(RunRequest::new("s1", "import subprocess").unwrap())
+            .await;
+        assert_eq!(result.status, RunStatus::ValidationError);
+        assert_eq!(
+            result.error.as_ref().map(|e| e.code.as_str()),
+            Some("UNSUPPORTED_FEATURE")
+        );
+    }
+
+    #[tokio::test]
+    async fn ast_validator_allows_blocked_word_in_string_literal() {
+        let runtime = MontyRuntime::new(ToolRegistry::new(), SessionLimits::default());
+        let result = runtime
+            .run(RunRequest::new("s1", "result = 'subprocess and __class__'").unwrap())
+            .await;
+        assert_eq!(result.status, RunStatus::Ok, "{result:?}");
+        assert_eq!(result.result, Some(json!("subprocess and __class__")));
+    }
+
+    #[tokio::test]
+    async fn ast_validator_blocks_dunder_attribute() {
+        let runtime = MontyRuntime::new(ToolRegistry::new(), SessionLimits::default());
+        let result = runtime
+            .run(RunRequest::new("s1", "x = ().__class__").unwrap())
+            .await;
+        assert_eq!(result.status, RunStatus::ValidationError);
+        assert_eq!(
+            result.error.as_ref().map(|e| e.code.as_str()),
+            Some("UNSUPPORTED_FEATURE")
+        );
+    }
+
+    #[tokio::test]
+    async fn ast_validator_flags_unregistered_suspicious_call() {
+        let runtime = MontyRuntime::new(ToolRegistry::new(), SessionLimits::default());
+        let result = runtime
+            .run(RunRequest::new("s1", "result = fetch_url('https://example.com')").unwrap())
+            .await;
+        assert_eq!(result.status, RunStatus::ValidationError);
+        assert_eq!(
+            result.error.as_ref().map(|e| e.code.as_str()),
+            Some("UNKNOWN_TOOL")
+        );
     }
 }

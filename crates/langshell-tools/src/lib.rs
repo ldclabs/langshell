@@ -54,6 +54,13 @@ pub fn register_builtin_tools(
     Ok(())
 }
 
+/// Register the read-only discovery tools (`list_tools`, `describe_tool`,
+/// `current_policy`).
+///
+/// **Ordering matters**: discovery tools capture a snapshot of the registry's
+/// current capabilities. Always call this *after* every other capability has
+/// been registered, otherwise the resulting `list_tools()` / `describe_tool()`
+/// output will not include capabilities registered later.
 pub fn register_discovery_tools(
     registry: &mut ToolRegistry,
 ) -> Result<(), langshell_core::ErrorObject> {
@@ -61,17 +68,23 @@ pub fn register_discovery_tools(
         "list_tools",
         "List capabilities registered in this session.",
         SideEffect::None,
-    );
+    )
+    .with_input_schema(no_args_schema())
+    .with_output_schema(json!({"type": "array", "items": capability_schema()}));
     let describe_capability = Capability::new(
         "describe_tool",
         "Describe one registered capability by name.",
         SideEffect::None,
-    );
+    )
+    .with_input_schema(single_string_arg_schema("name"))
+    .with_output_schema(capability_schema());
     let policy_capability = Capability::new(
         "current_policy",
         "Return the current sandbox policy summary.",
         SideEffect::None,
-    );
+    )
+    .with_input_schema(no_args_schema())
+    .with_output_schema(json!({"type": "object"}));
 
     let mut list_capabilities = registry.capabilities();
     list_capabilities.push(list_capability.clone());
@@ -146,7 +159,9 @@ pub fn register_file_tools(
             "read_text",
             "Read UTF-8 text from an authorized virtual path.",
             SideEffect::Read,
-        ),
+        )
+        .with_input_schema(single_string_arg_schema("path"))
+        .with_output_schema(json!({"type": "string"})),
         move |ctx| {
             let virtual_path = first_string_arg(&ctx, "read_text")?;
             let resolved = resolve_virtual_path(&read_mounts, &virtual_path, false)?;
@@ -164,7 +179,24 @@ pub fn register_file_tools(
             "write_text",
             "Write UTF-8 text to an authorized writable virtual path.",
             SideEffect::Write,
-        ),
+        )
+        .with_input_schema(json!({
+            "type": "array",
+            "prefixItems": [
+                {"type": "string", "description": "Authorized virtual path."},
+                {"type": "string", "description": "UTF-8 text content."}
+            ],
+            "minItems": 2,
+            "maxItems": 2
+        }))
+        .with_output_schema(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "bytes": {"type": "integer", "minimum": 0}
+            },
+            "required": ["path", "bytes"]
+        })),
         move |ctx| {
             let virtual_path = first_string_arg(&ctx, "write_text")?;
             let text = ctx.args.get(1).and_then(Value::as_str).ok_or_else(|| {
@@ -189,7 +221,9 @@ pub fn register_file_tools(
             "list_dir",
             "List direct children of an authorized virtual directory.",
             SideEffect::Read,
-        ),
+        )
+        .with_input_schema(single_string_arg_schema("path"))
+        .with_output_schema(json!({"type": "array", "items": {"type": "string"}})),
         move |ctx| {
             let virtual_path = first_string_arg(&ctx, "list_dir")?;
             let resolved = resolve_virtual_path(&list_mounts, &virtual_path, false)?;
@@ -214,14 +248,21 @@ pub fn register_http_tools(
     registry: &mut ToolRegistry,
     allowlist: Vec<String>,
 ) -> Result<(), langshell_core::ErrorObject> {
-    let allowlist = Arc::new(allowlist);
+    let allowlist: Arc<Vec<String>> = Arc::new(
+        allowlist
+            .into_iter()
+            .map(|host| host.to_lowercase())
+            .collect(),
+    );
     let text_allowlist = allowlist.clone();
     registry.register(RegisteredTool::asynchronous(
         Capability::new(
             "fetch_text",
             "Fetch text from an allowlisted HTTP(S) URL.",
             SideEffect::Network,
-        ),
+        )
+        .with_input_schema(single_string_arg_schema("url"))
+        .with_output_schema(json!({"type": "string"})),
         move |ctx| {
             let allowlist = text_allowlist.clone();
             Box::pin(async move {
@@ -229,7 +270,7 @@ pub fn register_http_tools(
                 ensure_url_allowed(&allowlist, &url)?;
                 Err(ToolError::new(
                     "TOOL_ERROR",
-                    "fetch_text transport is not configured in this MVP build.",
+                    "fetch_text transport is not configured in this build.",
                 ))
             }) as ToolFuture
         },
@@ -237,7 +278,13 @@ pub fn register_http_tools(
 
     let json_allowlist = allowlist;
     registry.register(RegisteredTool::asynchronous(
-        Capability::new("fetch_json", "Fetch JSON from an allowlisted HTTP(S) URL.", SideEffect::Network),
+        Capability::new(
+            "fetch_json",
+            "Fetch JSON from an allowlisted HTTP(S) URL.",
+            SideEffect::Network,
+        )
+        .with_input_schema(single_string_arg_schema("url"))
+        .with_output_schema(json!({})),
         move |ctx| {
             let allowlist = json_allowlist.clone();
             Box::pin(async move {
@@ -245,13 +292,40 @@ pub fn register_http_tools(
                 ensure_url_allowed(&allowlist, &url)?;
                 Err(ToolError::new(
                     "TOOL_ERROR",
-                    "fetch_json transport is not configured in this MVP build; register a host fetch_json capability.",
+                    "fetch_json transport is not configured in this build; register a host fetch_json capability.",
                 ))
             }) as ToolFuture
         },
     ))?;
 
     Ok(())
+}
+
+fn no_args_schema() -> Value {
+    json!({"type": "array", "maxItems": 0})
+}
+
+fn single_string_arg_schema(name: &str) -> Value {
+    json!({
+        "type": "array",
+        "prefixItems": [{"type": "string", "description": name}],
+        "minItems": 1,
+        "maxItems": 1
+    })
+}
+
+fn capability_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "description": {"type": "string"},
+            "input_schema": {"type": "object"},
+            "output_schema": {"type": "object"},
+            "side_effect": {"type": "string"}
+        },
+        "required": ["name", "description", "input_schema", "output_schema", "side_effect"]
+    })
 }
 
 fn first_string_arg(ctx: &ToolCallContext, function: &str) -> Result<String, ToolError> {
@@ -384,8 +458,9 @@ fn ensure_url_allowed(allowlist: &[String], url: &str) -> Result<(), ToolError> 
         .unwrap_or_default()
         .split(':')
         .next()
-        .unwrap_or_default();
-    if allowlist.iter().any(|allowed| allowed == host) {
+        .unwrap_or_default()
+        .to_lowercase();
+    if allowlist.iter().any(|allowed| allowed == &host) {
         Ok(())
     } else {
         Err(ToolError::new(

@@ -232,7 +232,7 @@ impl RunBuilder {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct LangShellBuilder {
     registry: ToolRegistry,
     limits: SessionLimits,
@@ -250,18 +250,6 @@ impl fmt::Debug for LangShellBuilder {
             .field("http_allowlist", &self.http_allowlist)
             .field("runtime_factories", &self.runtime_factories.len())
             .finish()
-    }
-}
-
-impl Default for LangShellBuilder {
-    fn default() -> Self {
-        Self {
-            registry: ToolRegistry::new(),
-            limits: SessionLimits::default(),
-            file_mounts: Vec::new(),
-            http_allowlist: Vec::new(),
-            runtime_factories: Vec::new(),
-        }
     }
 }
 
@@ -326,9 +314,13 @@ impl LangShellBuilder {
         name: impl Into<String>,
         description: impl Into<String>,
         side_effect: SideEffect,
+        input_schema: Value,
+        output_schema: Value,
         handler: impl Fn(ToolCallContext) -> ToolResult + Send + Sync + 'static,
     ) -> Result<Self, ErrorObject> {
-        let capability = Capability::new(name, description, side_effect);
+        let capability = Capability::new(name, description, side_effect)
+            .with_input_schema(input_schema)
+            .with_output_schema(output_schema);
         self.registry
             .register(RegisteredTool::sync(capability, handler))?;
         Ok(self)
@@ -339,13 +331,17 @@ impl LangShellBuilder {
         name: impl Into<String>,
         description: impl Into<String>,
         side_effect: SideEffect,
+        input_schema: Value,
+        output_schema: Value,
         handler: F,
     ) -> Result<Self, ErrorObject>
     where
         F: Fn(ToolCallContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ToolResult> + Send + 'static,
     {
-        let capability = Capability::new(name, description, side_effect);
+        let capability = Capability::new(name, description, side_effect)
+            .with_input_schema(input_schema)
+            .with_output_schema(output_schema);
         self.registry
             .register(RegisteredTool::asynchronous(capability, move |ctx| {
                 Box::pin(handler(ctx)) as ToolFuture

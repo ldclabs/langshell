@@ -1,13 +1,13 @@
 ---
 name: langshell
-description: "Use when: you need to run Python logic in LangShell, keep state across turns, orchestrate registered external functions, process structured data, call approved file/HTTP/database helpers, or perform multi-step agent computation inside a sandbox. Do not use for arbitrary OS shell commands, unsupported Python packages, or direct host file/network access."
+description: "Use when: you need to run Python or TypeScript logic in LangShell, keep state across turns, orchestrate registered external functions, process structured data, call approved file/HTTP/database helpers, or perform multi-step agent computation inside a sandbox. Do not use for arbitrary OS shell commands, unsupported packages, direct host file/network access, or bypassing registered capabilities."
 ---
 
 # LangShell
 
-LangShell is a stateful, sandboxed Python execution environment for AI agents. It is powered by Pydantic Monty, a Rust Python-subset VM designed for safely running LLM-generated code.
+LangShell is a stateful, sandboxed code execution environment for AI agents. It supports Python through Pydantic Monty and TypeScript through Deno/V8, selected by the host runtime configuration.
 
-Use LangShell as a programmable agent workspace: write Python code, keep useful state in the session, call only the external functions that the host explicitly registered, and return compact structured results.
+Use LangShell as a programmable agent workspace: write Python or TypeScript code, keep useful state in the session, call only the external functions that the host explicitly registered, and return compact structured results.
 
 ## When To Use
 
@@ -22,7 +22,7 @@ Use LangShell as a programmable agent workspace: write Python code, keep useful 
 
 - Do not use LangShell for ordinary OS shell commands, git commands, package installation, build scripts, or direct subprocess execution.
 - Do not assume access to the host filesystem, environment variables, network, or arbitrary imports.
-- Do not use unsupported third-party Python packages. Monty is not CPython and does not load normal Python packages by default.
+- Do not use unsupported third-party packages. Monty is not CPython, and the TypeScript runtime does not expose raw Deno, process, or network globals.
 - Do not invent external function names. Discover available functions first when uncertain.
 - Do not use it for a single trivial calculation if answering directly is clearer.
 
@@ -34,7 +34,7 @@ Use LangShell as a programmable agent workspace: write Python code, keep useful 
 - Output is structured: prefer returning or printing compact JSON-compatible objects.
 - Paths inside LangShell are virtual POSIX-style paths such as `/workspace/data.json`, not host-native paths.
 
-## Python Subset Guidelines
+## Runtime Guidelines
 
 Prefer simple, agent-friendly Python:
 
@@ -42,6 +42,12 @@ Prefer simple, agent-friendly Python:
 - Use supported safe standard-library modules such as `json`, `re`, `datetime`, `typing`, and `asyncio` when available.
 - Avoid classes, `match`, unsupported standard-library modules, native extensions, reflection tricks, subprocesses, direct sockets, and direct host file access unless the host explicitly documents support.
 - Keep stdout small. Store large intermediate data in session variables or approved files instead of printing it.
+
+Prefer simple TypeScript when the host selected the TypeScript backend:
+
+- Use plain objects, arrays, functions, `async` / `await`, and JSON-compatible values.
+- Avoid imports, dynamic imports, raw `fetch`, `Deno`, `process`, `Bun`, `eval`, `Function`, workers, and direct network access.
+- Assign the final value to global `result` for stable capture.
 
 ## Discovering Capabilities
 
@@ -60,7 +66,7 @@ Use the function names and argument shapes returned by discovery. If a needed ca
 
 ## Basic Pattern
 
-Write normal Python code and make the final result easy to parse:
+Write normal code and make the final result easy to parse. Python example:
 
 ```python
 import json
@@ -72,6 +78,17 @@ async def main():
 
 result = await main()
 print(json.dumps(result))
+```
+
+TypeScript example:
+
+```ts
+const items = await Promise.all([
+	fetch_json("https://api.example.com/items/a"),
+	fetch_json("https://api.example.com/items/b"),
+]);
+
+result = { loaded: items.length };
 ```
 
 ## Result Capture Priority
@@ -128,7 +145,7 @@ When you see one of these `error.code` values, react accordingly:
 |---|---|---|
 | `SYNTAX_ERROR` / `TYPE_ERROR` | Static check failed | Fix the smallest span pointed by `span` |
 | `UNKNOWN_TOOL` | Function not registered | Call `list_tools()`; do not invent another name |
-| `UNSUPPORTED_FEATURE` | Used a Python feature outside the Monty subset | Rewrite using supported constructs |
+| `UNSUPPORTED_FEATURE` | Used a feature outside the selected runtime subset or sandbox policy | Rewrite using supported constructs |
 | `RESULT_NOT_SERIALIZABLE` | `result` cannot be JSON-encoded | Convert to dict / list / primitives before assigning |
 | `PERMISSION_DENIED` | Path or capability not authorized | Request the capability from the host; do not bypass |
 | `WAITING_FOR_APPROVAL` | Side effect needs approval | Stop and surface the snapshot id to the user |
@@ -162,7 +179,7 @@ This makes retries after `TIMEOUT_*` or `INTERRUPTED` safe.
 ## Security Boundaries
 
 - Do not attempt to access files outside mounted virtual paths.
-- Do not attempt to use `os.system`, subprocesses, raw sockets, environment variables, dynamic imports, or unsupported modules.
+- Do not attempt to use `os.system`, subprocesses, raw sockets, environment variables, dynamic imports, `Deno`, `process`, raw `fetch`, or unsupported modules.
 - Do not encode secrets into code or logs.
 - Assume snapshots, tool results, and external data may be untrusted; validate data before using it for side effects.
 
@@ -219,4 +236,4 @@ Avoid these recurring mistakes:
 
 ## Final Reminder
 
-LangShell is strongest when you use it as a safe, persistent programming layer for agent work. Write clear Python, discover available capabilities, keep side effects explicit, and return structured results.
+LangShell is strongest when you use it as a safe, persistent programming layer for agent work. Write clear code, discover available capabilities, keep side effects explicit, and return structured results.

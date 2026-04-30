@@ -1,4 +1,4 @@
-# LangShell MVP E2E Examples
+# LangShell End-to-End Examples
 
 Run these from the repository root.
 

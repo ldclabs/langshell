@@ -1,126 +1,113 @@
-# 🖥️ LangShell
+# LangShell
 
 > Stateful, capability-scoped, sandboxed code execution for AI agents.
 
 **[English](./README.md) | [中文](./README_CN.md)**
 
-LangShell is a secure execution layer for AI agents. Its goal is to let an agent produce a piece of Python code that can be validated, resumed, and audited to complete complex work, instead of decomposing everything into a large number of fragile tool calls.
+LangShell is a secure execution layer for AI agents. It lets a host run agent-authored Python or TypeScript code inside persistent, capability-scoped sessions, while keeping all interaction with files, networks, databases, and other external systems behind explicit host-registered functions.
 
-The project is implemented in Rust. The MVP uses Pydantic Monty as the Python-subset execution engine. The core idea behind LangShell is simple: treat code as the interface, sessions as the unit of state, and host-registered capabilities as the only entry points to the outside world.
+The repository is in active development. Local session snapshots and internal data formats are allowed to change without migration support until the project declares a stable release. The current development baseline uses CBOR snapshots, AST-based static validation, and schema-described capabilities.
 
-## Current Status
+## What Works Today
 
-This repository contains a working MVP of the core LangShell flow, not just crate scaffolding.
-
-- `langshell-core` defines the stable data contracts for sessions, tools, diagnostics, errors, and snapshots.
-- `langshell-monty` runs Python-subset code in persistent Monty sessions, supports validation, captures `result` and final-expression values, and records external calls.
-- `langshell-tools` registers discovery tools plus opt-in file and HTTP capability helpers for hosts.
-- `langshell` exposes a backend-neutral Rust SDK builder for mounts, allowlists, custom sync or async capabilities, and host-selected language runtimes.
+- `langshell-core` defines shared contracts for sessions, capabilities, diagnostics, metrics, errors, and runtime backends.
+- `langshell-monty` executes Python-subset code with persistent Monty sessions, top-level await, AST-based validation, result capture, external call auditing, and CBOR snapshots.
+- `langshell-deno` executes TypeScript code through Deno/V8 with the same runtime trait, persistent globals, AST-based validation, typed CBOR snapshots, and async capability dispatch.
+- `langshell-tools` registers discovery tools plus host-configurable file and HTTP capability helpers.
+- `langshell` provides a backend-neutral Rust SDK builder for limits, mounts, allowlists, sync or async capabilities, and host-selected runtimes.
 - `langshell-cli` provides `run`, `validate`, `repl`, `daemon`, `session`, and `tools` commands with stable JSON output.
-- End-to-end scripts and SDK coverage live under [examples/README.md](./examples/README.md), `crates/langshell/tests`, and backend crate tests.
+- End-to-end scripts and SDK coverage live under [examples/README.md](./examples/README.md), backend tests, and SDK tests.
 
-[AGENTS.md](AGENTS.md) remains the source of truth for product requirements and engineering contracts, and [SKILL.md](SKILL.md) describes how an AI agent should use LangShell safely.
+[AGENTS.md](AGENTS.md) is the product and engineering contract. [SKILL.md](SKILL.md) describes how an AI agent should use LangShell safely.
 
 ## Why LangShell
 
-Traditional agent execution paths usually fall into one of two extremes:
+Traditional agent execution paths often fall between two poor choices:
 
-- Tool calling is too fragmented. Complex logic requires many round trips, costs more, and is hard to recover when something fails.
-- A normal shell has too much privilege, weak state handling, and brittle output parsing. It is not a good place to run untrusted LLM-generated code.
+- Tool calling is safe but fragmented. Complex work becomes many round trips, repeated context, brittle recovery, and more schema surface.
+- A normal shell is expressive but overpowered. It has broad ambient access, weak structured output, fragile parsing, and no natural capability boundary.
 
-LangShell is intended to provide a middle layer:
+LangShell is the middle layer:
 
 ```text
-AI tokens -> Python code -> safe execution -> structured result -> resumable state
+AI tokens -> sandboxed code -> mediated capabilities -> structured result -> resumable state
 ```
 
-It aims to serve three groups at once:
+It is designed for three groups at once:
 
-- AI agents: use familiar Python to express loops, branching, caching, retries, concurrency, and data transformation.
-- Agent framework developers: embed execution through a stable protocol, register tools, enforce limits, and collect audit data.
-- Platform and security owners: keep the system zero-permission by default and force all side effects through explicit capability boundaries.
+- AI agents write code for loops, branching, caching, retries, concurrency, and data transformation.
+- Agent framework developers embed a stable runtime, register tools, enforce limits, and collect audit records.
+- Platform and security owners keep the default policy closed and force every side effect through a named capability.
 
-## Design Principles
+## Core Model
 
-- Code is the interface: for the agent, the main interface is code rather than an ever-growing collection of tool schemas.
-- Session is the unit: state, limits, auditing, snapshots, and lifecycle management all center on the session.
-- Capabilities over permissions: nothing is allowed by default, and all external capabilities must be explicitly registered by the host.
-- Every side effect is mediated: file, network, database, and other side effects must pass through host-defined capabilities.
-- Errors are for agents: errors must be stable, structured, and useful for automatic repair and retry.
+- **Code is the interface**: agents express multi-step logic as code instead of many tiny tool calls.
+- **Session is the state unit**: variables, functions, globals, capabilities, limits, and snapshots belong to a session.
+- **Capabilities replace ambient permissions**: filesystem, network, database, and business APIs are only reachable through registered functions.
+- **Validation happens before execution**: Python and TypeScript validation uses AST checks for imports, dangerous globals, reflection escape patterns, and unknown capability-like calls.
+- **Snapshots are development-versioned**: current snapshots are CBOR v2. Old local snapshots are not migrated.
 
-## Implemented MVP Scope
+## Implemented Capabilities
 
-The current MVP provides:
-
-- Stateful execution of a Python subset.
+- Stateful Python-subset execution with Monty.
+- Stateful TypeScript execution with Deno/V8.
 - Top-level await and async capability calls.
-- Validate and dry-run modes that catch syntax, type, permission, and tool-availability issues without causing side effects.
-- A capability registry so the host can expose controlled external functions.
-- Capability discovery interfaces such as `list_tools`, `describe_tool`, and `current_policy`.
-- Structured results, stdout and stderr capture, diagnostics, and stable error codes.
-- Result capture priority of global `result`, then last expression, then stdout fallback.
-- Limits for timeout, cancellation, output size, memory, and external call counts.
-- Snapshot and restore for resumability and approval-boundary pauses.
-- A Unix-socket JSON-RPC daemon path for session and tool operations.
+- Validate / dry-run flows that catch syntax, permission, feature, and tool-availability problems before side effects.
+- Capability discovery through `list_tools`, `describe_tool`, and `current_policy`.
+- Structured `RunResult` output with `result`, stdout, stderr, diagnostics, external call records, metrics, and stable error codes.
+- Result capture priority: global `result`, then final expression when supported, then stdout fallback.
+- Resource controls for wall-clock timeout, output size, memory, stack depth, and external call count.
+- CBOR snapshots for session restore. Deno snapshots include tagged values for `bigint`, `Uint8Array`, `Map`, `Set`, and `Date`.
+- JSON-RPC daemon over Unix sockets for session, run, snapshot, restore, and tool operations.
 
-The MVP also includes host-side helpers for controlled file and HTTP capability wiring, including `read_text`, `write_text`, `list_dir`, `fetch_text`, and `fetch_json`.
+## Current Constraints
 
-## Current Limitations
+- Monty is a Python subset, not CPython. Unsupported standard-library modules, third-party packages, subprocesses, raw sockets, and reflection escapes are blocked or unavailable.
+- The TypeScript backend is available, but Deno/V8 runtime lifecycle is kept behind the `LanguageRuntime` trait and a dedicated worker.
+- Built-in file tools only work when a host configures authorized virtual mounts.
+- Built-in HTTP helpers enforce allowlists and schemas, but the default build does not ship live network transport. Hosts should register their own `fetch_text` or `fetch_json` capability for real HTTP access.
+- The CLI daemon currently supports `unix://` listeners.
+- Development data is disposable: local session files and snapshots may be invalidated by code changes.
 
-- The public `langshell` SDK no longer depends on concrete backend crates. Hosts choose and register a `LanguageRuntime`, such as `langshell-monty` for Python or `langshell-deno` for TypeScript.
-- `langshell-monty` remains unpublished until upstream `monty` is available on crates.io; the SDK can still be published independently.
-- File tools are only available when the host configures authorized mounts through the SDK builder.
-- The built-in HTTP helpers enforce allowlists and capability shape, but do not ship a real network transport in the default build. Hosts should register their own `fetch_text` or `fetch_json` handlers for live HTTP access.
-- The CLI daemon currently supports `unix://` listeners only.
-
-## Architecture Overview
+## Architecture
 
 ```text
 Agent / Host App
-	|
-	+-- CLI
-	+-- JSON-RPC Daemon
-	+-- Rust SDK
-	        |
-	        v
-	  langshell SDK
-		 |
-	 +------+----------------+
-	 |                       |
-	 v                       v
-	langshell-tools      langshell-core
-				    |
-				    v
-			   LanguageRuntime trait
-				    |
-		+-----------------+-----------------+
-		|                                   |
-		v                                   v
-	langshell-monty                     langshell-deno
-		|                                   |
-		v                                   v
-	     Monty VM                           Deno/V8
+    |
+    +-- CLI
+    +-- JSON-RPC Daemon
+    +-- Rust SDK
+            |
+            v
+      langshell SDK
+            |
+     +------+----------------+
+     |                       |
+     v                       v
+langshell-tools        langshell-core
+                              |
+                              v
+                       LanguageRuntime trait
+                              |
+              +---------------+---------------+
+              |                               |
+              v                               v
+       langshell-monty                 langshell-deno
+              |                               |
+              v                               v
+           Monty VM                         Deno/V8
 ```
-
-Responsibilities are split along these boundaries:
-
-- `langshell-core`: core abstractions, including the stable contracts for sessions, policy, registry, snapshots, diagnostics, and the `LanguageRuntime` backend trait.
-- `langshell-monty`: the MVP execution backend that encapsulates all Monty-specific integration.
-- `langshell-deno`: the TypeScript execution backend that implements the same runtime trait.
-- `langshell-tools`: built-in capability modules such as file and HTTP tools.
-- `langshell-cli`: the developer-facing command-line entry point, intended to host commands such as run, validate, repl, daemon, session, and tools.
-- `langshell`: the public Rust SDK for hosts to register capabilities, select runtime backends, and initiate execution without depending on concrete engines.
 
 ## Crates
 
-| Crate             | Role                                                                                                            |
-| ----------------- | --------------------------------------------------------------------------------------------------------------- |
-| `langshell-core`  | Stable Rust and JSON-facing contracts for sessions, capabilities, diagnostics, metrics, and snapshots.          |
-| `langshell-monty` | Monty-backed runtime implementation with persistent sessions, validation, result capture, and snapshot support. |
-| `langshell-deno`  | Deno-backed TypeScript runtime implementation with persistent sessions and snapshot support.                    |
-| `langshell-tools` | Built-in discovery tools and host-configurable file and HTTP capability helpers.                                |
-| `langshell`       | Public Rust SDK for configuring policy, registering capabilities, and composing selected runtime backends.      |
-| `langshell-cli`   | CLI binary and line-delimited JSON-RPC daemon for running code and inspecting sessions.                         |
+| Crate             | Role                                                                                                    |
+| ----------------- | ------------------------------------------------------------------------------------------------------- |
+| `langshell-core`  | Shared contracts for sessions, runs, capabilities, diagnostics, metrics, snapshots, and runtime traits. |
+| `langshell-monty` | Python runtime implementation backed by Monty.                                                          |
+| `langshell-deno`  | TypeScript runtime implementation backed by Deno/V8.                                                    |
+| `langshell-tools` | Discovery, file, and HTTP capability helpers.                                                           |
+| `langshell`       | Public Rust SDK for composing runtimes and registering capabilities.                                    |
+| `langshell-cli`   | CLI binary and JSON-RPC daemon.                                                                         |
 
 ## Repository Layout
 
@@ -134,20 +121,13 @@ langshell/
 │   ├── langshell-monty/
 │   └── langshell-tools/
 ├── docs/
+├── examples/
 ├── AGENTS.md
 ├── SKILL.md
 └── README.md
 ```
 
-The crate layout mirrors the engineering contract in [AGENTS.md](AGENTS.md) while mapping cleanly onto the code that ships in this MVP.
-
-## Interface Examples
-
-The following examples correspond to code paths that exist in this repository today.
-
-### Agent-Side Python
-
-This is the shape of code an agent can run once a host has registered the required capabilities:
+## Python Example
 
 ```python
 import json
@@ -162,7 +142,7 @@ result = await main()
 print(json.dumps(result))
 ```
 
-### CLI Commands Available Today
+## CLI Examples
 
 ```bash
 cargo run -q -p langshell-cli --bin langshell -- run -e 'result = sum(range(10))' --json
@@ -171,22 +151,30 @@ cargo run -q -p langshell-cli --bin langshell -- session list
 cargo run -q -p langshell-cli --bin langshell -- daemon --listen unix:///tmp/langshell.sock
 ```
 
-The repository also includes shell scripts for the acceptance flows in [examples/README.md](./examples/README.md).
-
-### Rust SDK Backend Assembly
-
-The SDK crate is publishable on its own. A host application chooses the concrete backend crate and registers it with the builder:
+## Rust SDK Example
 
 ```rust
-use langshell::LangShell;
+use langshell::{LangShell, SideEffect};
 use langshell_monty::MontyRuntime;
+use serde_json::{Value, json};
 
 let shell = LangShell::builder()
-	.runtime(MontyRuntime::new)
-	.build()?;
+    .runtime(MontyRuntime::new)
+    .register_async(
+        "fetch_json",
+        "Fetch JSON from an approved source.",
+        SideEffect::Network,
+        json!({"type": "array", "prefixItems": [{"type": "string"}], "minItems": 1, "maxItems": 1}),
+        json!({"type": "object"}),
+        |ctx| async move {
+            let url = ctx.args.first().and_then(Value::as_str).unwrap_or_default();
+            Ok(json!({"url": url, "ok": true}))
+        },
+    )?
+    .build()?;
 ```
 
-### JSON-RPC Request Shape
+## JSON-RPC Request Shape
 
 The daemon speaks line-delimited JSON-RPC 2.0 over a Unix socket.
 
@@ -204,50 +192,36 @@ The daemon speaks line-delimited JSON-RPC 2.0 over a Unix socket.
 }
 ```
 
-## Key Stable Contracts
-
-According to the current design document, several constraints need to be locked down early in the MVP:
-
-- Result capture priority: first the global `result` variable, then the last expression value, and only then stdout.
-- Error codes must remain stable and machine-readable, including values such as `UNKNOWN_TOOL`, `PERMISSION_DENIED`, `RESULT_NOT_SERIALIZABLE`, and `TIMEOUT_WALL`.
-- Snapshots must be versioned and validated against the capability set to avoid silently restoring into an incompatible environment.
-- The sandbox must be zero-permission by default, with no direct access to the host filesystem, environment variables, subprocesses, or arbitrary network access.
-
-These constraints directly shape the implementation of the CLI, daemon, SDK, and test matrix.
-
-## Getting Started
+## Development
 
 ### Requirements
 
 - Rust stable toolchain with Edition 2024 support.
 - Git submodules.
-- Any supported macOS, Linux, or Windows environment.
+- macOS, Linux, or Windows.
 
-### Clone the Repository
+### Setup
 
 ```bash
 git clone --recurse-submodules <repo-url>
 cd langshell
 ```
 
-If you have already cloned the repository:
+If the repository was cloned without submodules:
 
 ```bash
 git submodule update --init --recursive
 ```
 
-### Build and Test
-
-The baseline checks for the workspace are:
+### Checks
 
 ```bash
-cargo check
-cargo test
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets
 ```
 
-### Try the End-to-End Examples
-
-Run the acceptance scripts from the repository root:
+### End-to-End Scripts
 
 ```bash
 bash examples/cli_single.sh
@@ -257,44 +231,22 @@ bash examples/snapshot_restore.sh
 cargo run -q -p langshell-monty --example sdk_async_fanout
 ```
 
-To start the daemon manually:
+The CLI persists development session snapshots under `LANGSHELL_SESSION_DIR` when set, or under the platform temporary directory. These files are not treated as stable storage.
 
-```bash
-cargo run -q -p langshell-cli --bin langshell -- daemon --listen unix:///tmp/langshell.sock
-```
+## Near-Term Work
 
-The CLI persists session snapshots under `LANGSHELL_SESSION_DIR` when set, or under the platform temporary directory by default.
-
-## Near-Term Focus
-
-The next implementation steps are the remaining V1 items from the product contract: a durable snapshot store, richer tool description stubs, more transport-backed capability modules, and broader security and compatibility coverage.
+- Durable snapshot store.
+- Session fork / diff / reset.
+- Richer generated stubs and tool descriptions.
+- Transport-backed HTTP helpers and more capability modules.
+- Broader security tests for path escape, tool storms, snapshot corruption, and resource exhaustion.
+- Windows named pipe daemon transport.
 
 ## Documentation
 
-- [AGENTS.md](AGENTS.md): product requirements, engineering contracts, error codes, snapshots, and the test matrix.
-- [SKILL.md](SKILL.md): how agents should use LangShell, including restrictions and best practices.
-
-If RFCs, API references, or examples are added later, they should be placed under `docs/` and `examples/` and linked from this README.
-
-## Roadmap
-
-### MVP
-
-- Monty integration.
-- Persistent session state.
-- Structured results and diagnostics output.
-- Validate mode.
-- Capability registry.
-- Built-in file and HTTP capabilities.
-- A minimal usable path across the CLI, daemon IPC, and Rust SDK.
-
-### V1+
-
-- Durable snapshot store.
-- More complete typed stubs and tool-description injection.
-- SQLite and object_store plugins.
-- TypeScript and Deno backend.
-- Multi-tenant daemon and remote execution support.
+- [AGENTS.md](AGENTS.md): product direction, runtime contracts, data structures, snapshot format, error codes, and test matrix.
+- [SKILL.md](SKILL.md): safe agent-facing usage guidance.
+- [examples/README.md](./examples/README.md): runnable CLI and SDK examples.
 
 ## License
 

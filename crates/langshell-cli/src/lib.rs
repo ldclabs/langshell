@@ -52,7 +52,10 @@ struct RunCommand {
     timeout_ms: Option<u32>,
     #[arg(long = "language", default_value = "python")]
     language: String,
-    #[arg(long = "json", default_value_t = false)]
+    /// Emit JSON output. Currently the only supported output format; accepted
+    /// for forward compatibility with a future human-readable mode.
+    #[arg(long = "json", default_value_t = true)]
+    #[allow(dead_code)]
     json: bool,
 }
 
@@ -60,6 +63,8 @@ struct RunCommand {
 struct ReplCommand {
     #[arg(long = "session-id", default_value = "default")]
     session_id: String,
+    #[arg(long = "language", default_value = "python")]
+    language: String,
 }
 
 #[derive(Args, Debug)]
@@ -164,6 +169,7 @@ async fn run_code(command: RunCommand, validate_only: bool) -> Result<ExitCode, 
 
 async fn run_repl(command: ReplCommand) -> Result<ExitCode, ErrorObject> {
     let shell = default_shell()?;
+    let language = parse_language(&command.language)?;
     load_session_if_exists(&shell, &command.session_id).await?;
     let mut line = String::new();
     loop {
@@ -179,13 +185,13 @@ async fn run_repl(command: ReplCommand) -> Result<ExitCode, ErrorObject> {
             break;
         }
         let result = shell
-            .session(&command.session_id)
+            .session_with_language(&command.session_id, language)
             .run(line.clone())
             .execute()
             .await;
         print_json(&result)?;
         if result.status == RunStatus::Ok {
-            save_session(&shell, &command.session_id, Language::Python).await?;
+            save_session(&shell, &command.session_id, language).await?;
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -258,7 +264,7 @@ async fn run_daemon(command: DaemonCommand) -> Result<ExitCode, ErrorObject> {
     let path = command.listen.strip_prefix("unix://").ok_or_else(|| {
         ErrorObject::new(
             "INVALID_ARGUMENT",
-            "Only unix:// daemon listeners are supported in MVP.",
+            "Only unix:// daemon listeners are currently supported.",
         )
     })?;
     if Path::new(path).exists() {
@@ -461,7 +467,7 @@ fn request_from_params(params: Value) -> Result<RunRequest, ErrorObject> {
         Some(other) => {
             return Err(ErrorObject::new(
                 "UNSUPPORTED_FEATURE",
-                format!("Language {other} is not supported in MVP."),
+                format!("Language {other} is not supported."),
             ));
         }
     };
@@ -502,14 +508,15 @@ fn default_shell() -> Result<LangShell, ErrorObject> {
 
 async fn load_session_if_exists(shell: &LangShell, session_id: &str) -> Result<(), ErrorObject> {
     let path = session_file(session_id)?;
-    if path.exists() {
-        let bytes = fs::read(&path).map_err(|err| {
-            ErrorObject::new("IO_ERROR", format!("reading {}: {err}", path.display()))
-        })?;
-        shell
-            .restore_session(&bytes, Some(session_id.to_owned()))
-            .await?;
+    if !path.exists() {
+        return Ok(());
     }
+    let bytes = fs::read(&path).map_err(|err| {
+        ErrorObject::new("IO_ERROR", format!("reading {}: {err}", path.display()))
+    })?;
+    shell
+        .restore_session(&bytes, Some(session_id.to_owned()))
+        .await?;
     Ok(())
 }
 
@@ -555,18 +562,19 @@ fn list_stored_sessions() -> Result<Vec<String>, ErrorObject> {
         if let Some(name) = entry
             .file_name()
             .to_str()
-            .and_then(|name| name.strip_suffix(".json"))
+            .and_then(|name| name.strip_suffix(".cbor"))
         {
             sessions.push(name.to_owned());
         }
     }
     sessions.sort();
+    sessions.dedup();
     Ok(sessions)
 }
 
 fn session_file(session_id: &str) -> Result<PathBuf, ErrorObject> {
     let session_id = SessionId::new(session_id)?;
-    Ok(session_dir().join(format!("{}.json", session_id.0)))
+    Ok(session_dir().join(format!("{}.cbor", session_id.0)))
 }
 
 fn session_dir() -> PathBuf {

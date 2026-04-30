@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha3::{Digest, Sha3_256};
 
-pub const SNAPSHOT_VERSION: u32 = 1;
+pub const SNAPSHOT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
@@ -173,9 +173,19 @@ impl Capability {
             idempotent: true,
         }
     }
+
+    pub fn with_input_schema(mut self, schema: Value) -> Self {
+        self.input_schema = schema;
+        self
+    }
+
+    pub fn with_output_schema(mut self, schema: Value) -> Self {
+        self.output_schema = schema;
+        self
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RunRequest {
     pub session_id: SessionId,
     pub language: Language,
@@ -194,29 +204,9 @@ impl RunRequest {
     ) -> Result<Self, ErrorObject> {
         Ok(Self {
             session_id: SessionId::new(session_id)?,
-            language: Language::Python,
             code: code.into(),
-            inputs: Map::new(),
-            timeout_ms: None,
-            limits: None,
-            return_snapshot: false,
-            validate_only: false,
+            ..Self::default()
         })
-    }
-}
-
-impl Default for RunRequest {
-    fn default() -> Self {
-        Self {
-            session_id: SessionId::default(),
-            language: Language::Python,
-            code: String::new(),
-            inputs: Map::new(),
-            timeout_ms: None,
-            limits: None,
-            return_snapshot: false,
-            validate_only: false,
-        }
     }
 }
 
@@ -282,6 +272,16 @@ impl Diagnostic {
             message: error.message.clone(),
             hint: error.hint.clone(),
             span: error.span,
+        }
+    }
+
+    pub fn warning(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            severity: Severity::Warning,
+            code: code.into(),
+            message: message.into(),
+            hint: None,
+            span: None,
         }
     }
 }
@@ -583,6 +583,22 @@ pub fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Truncate `text` so that its UTF-8 encoded length is at most `max_bytes`,
+/// always keeping the result on a valid UTF-8 character boundary.
+///
+/// Returns `true` when truncation occurred.
+pub fn truncate_utf8(text: &mut String, max_bytes: usize) -> bool {
+    if text.len() <= max_bytes {
+        return false;
+    }
+    let mut boundary = max_bytes;
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    text.truncate(boundary);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,5 +615,18 @@ mod tests {
         assert!(is_python_identifier("fetch_json"));
         assert!(!is_python_identifier("1_fetch"));
         assert!(!is_python_identifier("fetch-json"));
+    }
+
+    #[test]
+    fn truncates_on_utf8_boundary() {
+        let mut text = "héllo".to_owned();
+        // 'é' is 2 bytes; cutting at byte 2 lands inside it.
+        let truncated = truncate_utf8(&mut text, 2);
+        assert!(truncated);
+        assert_eq!(text, "h");
+
+        let mut keep = "abc".to_owned();
+        assert!(!truncate_utf8(&mut keep, 10));
+        assert_eq!(keep, "abc");
     }
 }

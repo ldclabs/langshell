@@ -1,3 +1,14 @@
+use deno_ast::{MediaType, ParseParams, SourceMapOption};
+use deno_core::{Extension, JsRuntime, OpState, PollEventLoopOptions, RuntimeOptions, op2, v8};
+use deno_error::JsErrorBox;
+use ic_auth_types::deterministic_cbor_into;
+use langshell_core::{
+    CallStatus, Diagnostic, ErrorObject, ExternalCallRecord, Language, LanguageRuntime, Metrics,
+    RunRequest, RunResult, RunStatus, RuntimeFuture, SessionId, SessionLimits, ToolCallContext,
+    ToolRegistry, digest_bytes, digest_json, truncate_utf8,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -7,26 +18,32 @@ use std::{
         Arc, Condvar, Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
     },
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
-
-use deno_ast::{MediaType, ParseParams, SourceMapOption};
-use deno_core::{Extension, JsRuntime, OpState, PollEventLoopOptions, RuntimeOptions, op2, v8};
-use deno_error::JsErrorBox;
-use langshell_core::{
-    CallStatus, ErrorObject, ExternalCallRecord, Language, LanguageRuntime, Metrics, RunRequest,
-    RunResult, RunStatus, RuntimeFuture, SessionId, SessionLimits, ToolCallContext, ToolRegistry,
-    digest_bytes, digest_json,
-};
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 pub const DENO_SNAPSHOT_MAGIC: &str = "langshell-deno-snapshot/v1";
 
 #[derive(Clone)]
 pub struct DenoRuntime {
+    inner: Arc<DenoRuntimeInner>,
+}
+
+struct DenoRuntimeInner {
     tx: mpsc::UnboundedSender<DenoCommand>,
+    join: StdMutex<Option<JoinHandle<()>>>,
+}
+
+impl Drop for DenoRuntimeInner {
+    fn drop(&mut self) {
+        let (reply, rx) = std::sync::mpsc::channel();
+        let _ = self.tx.send(DenoCommand::Shutdown { reply });
+        let _ = rx.recv_timeout(Duration::from_secs(5));
+        if let Some(join) = self.join.lock().expect("deno worker join lock").take() {
+            let _ = join.join();
+        }
+    }
 }
 
 impl fmt::Debug for DenoRuntime {
@@ -38,11 +55,16 @@ impl fmt::Debug for DenoRuntime {
 impl DenoRuntime {
     pub fn new(registry: ToolRegistry, default_limits: SessionLimits) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        std::thread::Builder::new()
+        let join = std::thread::Builder::new()
             .name("langshell-deno".to_owned())
             .spawn(move || run_worker_thread(rx, registry, default_limits))
             .expect("failed to spawn langshell-deno worker thread");
-        Self { tx }
+        Self {
+            inner: Arc::new(DenoRuntimeInner {
+                tx,
+                join: StdMutex::new(Some(join)),
+            }),
+        }
     }
 
     pub async fn create_session(
@@ -107,7 +129,10 @@ impl DenoRuntime {
     }
 
     fn send(&self, command: DenoCommand) -> Result<(), ErrorObject> {
-        self.tx.send(command).map_err(|_| worker_closed_error())
+        self.inner
+            .tx
+            .send(command)
+            .map_err(|_| worker_closed_error())
     }
 }
 
@@ -160,16 +185,14 @@ impl LanguageRuntime for DenoRuntime {
 }
 
 pub fn is_deno_snapshot(snapshot: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(snapshot)
+    #[derive(Deserialize)]
+    struct Peek {
+        magic: String,
+    }
+    ciborium::from_reader::<Peek, _>(snapshot)
         .ok()
-        .and_then(|value| {
-            value
-                .get("magic")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .as_deref()
-        == Some(DENO_SNAPSHOT_MAGIC)
+        .map(|peek| peek.magic == DENO_SNAPSHOT_MAGIC)
+        .unwrap_or(false)
 }
 
 enum DenoCommand {
@@ -198,6 +221,9 @@ enum DenoCommand {
         session_id: Option<SessionId>,
         reply: oneshot::Sender<Result<SessionId, ErrorObject>>,
     },
+    Shutdown {
+        reply: std::sync::mpsc::Sender<()>,
+    },
 }
 
 fn run_worker_thread(
@@ -212,6 +238,10 @@ fn run_worker_thread(
     runtime.block_on(async move {
         let mut worker = DenoWorker::new(registry, default_limits);
         while let Some(command) = rx.recv().await {
+            if let DenoCommand::Shutdown { reply } = command {
+                let _ = reply.send(());
+                break;
+            }
             worker.handle(command).await;
         }
     });
@@ -265,6 +295,9 @@ impl DenoWorker {
             } => {
                 let result = self.restore_session(&snapshot, session_id);
                 let _ = reply.send(result);
+            }
+            DenoCommand::Shutdown { reply } => {
+                let _ = reply.send(());
             }
         }
     }
@@ -338,12 +371,14 @@ impl DenoWorker {
             globals: session.snapshot_globals()?,
             capability_digest: capability_digest(&self.registry),
         };
-        serde_json::to_vec(&snapshot).map_err(|err| {
+        let mut buf = Vec::with_capacity(512);
+        deterministic_cbor_into(&snapshot, &mut buf).map_err(|err| {
             ErrorObject::new(
                 "SNAPSHOT_CORRUPT",
                 format!("Failed to serialize Deno snapshot: {err}"),
             )
-        })
+        })?;
+        Ok(buf)
     }
 
     fn restore_session(
@@ -351,7 +386,7 @@ impl DenoWorker {
         snapshot: &[u8],
         session_id: Option<SessionId>,
     ) -> Result<SessionId, ErrorObject> {
-        let snapshot: SnapshotEnvelope = serde_json::from_slice(snapshot).map_err(|err| {
+        let snapshot: SnapshotEnvelope = ciborium::from_reader(snapshot).map_err(|err| {
             ErrorObject::new("SNAPSHOT_CORRUPT", format!("Invalid Deno snapshot: {err}"))
         })?;
         if snapshot.magic != DENO_SNAPSHOT_MAGIC {
@@ -393,10 +428,10 @@ impl DenoSession {
         limits: SessionLimits,
         registry: &ToolRegistry,
     ) -> Result<Self, ErrorObject> {
-        let create_params = v8::Isolate::create_params().heap_limits(
-            0,
-            usize::try_from(limits.memory_mb).unwrap_or(usize::MAX / 1024 / 1024) * 1024 * 1024,
-        );
+        let heap_max = (limits.memory_mb as usize)
+            .saturating_mul(1024 * 1024)
+            .max(1);
+        let create_params = v8::Isolate::create_params().heap_limits(0, heap_max);
         let mut runtime = JsRuntime::try_new(RuntimeOptions {
             extensions: vec![langshell_extension(registry.clone(), limits.clone())],
             create_params: Some(create_params),
@@ -458,11 +493,10 @@ impl DenoSession {
             let mut result = RunResult::error(
                 code_to_status(&error.code, false),
                 error,
-                truncate_stdout(state.stdout, &self.limits),
+                String::new(),
                 metrics(started, state.records.len() as u32),
             );
-            result.stderr = truncate_stdout(state.stderr, &self.limits);
-            result.external_calls = state.records;
+            apply_streams(&mut result, state, &self.limits);
             return result;
         }
 
@@ -472,22 +506,20 @@ impl DenoSession {
                 let mut result = RunResult::error(
                     RunStatus::ValidationError,
                     error,
-                    truncate_stdout(state.stdout, &self.limits),
+                    String::new(),
                     metrics(started, state.records.len() as u32),
                 );
-                result.stderr = truncate_stdout(state.stderr, &self.limits);
-                result.external_calls = state.records;
+                apply_streams(&mut result, state, &self.limits);
                 return result;
             }
         };
 
         let mut result = RunResult::ok(
             result_value,
-            truncate_stdout(state.stdout, &self.limits),
+            String::new(),
             metrics(started, state.records.len() as u32),
         );
-        result.stderr = truncate_stdout(state.stderr, &self.limits);
-        result.external_calls = state.records;
+        apply_streams(&mut result, state, &self.limits);
         if request.return_snapshot {
             result.snapshot_id = Some(format!("snap_{}", digest_bytes(self.id.0.as_bytes())));
         }
@@ -786,10 +818,73 @@ for (const tool of __langshellToolDefs) {{
     : (...args) => __langshellOps.op_langshell_call_tool_sync(tool.name, args, {{}});
   Object.defineProperty(globalThis, tool.name, {{ value: call, writable: false, configurable: true }});
 }}
+Object.defineProperty(globalThis, "__langshell_tag_value", {{
+  value: function tag(value, seen) {{
+    if (value === null) return null;
+    const t = typeof value;
+    if (t === "bigint") return {{ __lang: "bigint", v: String(value) }};
+    if (t === "function" || t === "symbol" || t === "undefined") return undefined;
+    if (t !== "object") return value;
+    if (seen.has(value)) throw new TypeError("cyclic value cannot be snapshotted");
+    seen.add(value);
+    if (value instanceof Date) return {{ __lang: "date", v: value.toISOString() }};
+    if (value instanceof Map) {{
+      const entries = [];
+      for (const [k, v] of value.entries()) {{
+        const tk = tag(k, seen);
+        const tv = tag(v, seen);
+        if (tk === undefined || tv === undefined) continue;
+        entries.push([tk, tv]);
+      }}
+      return {{ __lang: "map", v: entries }};
+    }}
+    if (value instanceof Set) {{
+      const items = [];
+      for (const v of value.values()) {{
+        const tv = tag(v, seen);
+        if (tv !== undefined) items.push(tv);
+      }}
+      return {{ __lang: "set", v: items }};
+    }}
+    if (value instanceof Uint8Array) {{
+      return {{ __lang: "uint8array", v: Array.from(value) }};
+    }}
+    if (Array.isArray(value)) {{
+      return value.map((item) => {{
+        const tv = tag(item, seen);
+        return tv === undefined ? null : tv;
+      }});
+    }}
+    const out = {{}};
+    for (const [k, v] of Object.entries(value)) {{
+      const tv = tag(v, seen);
+      if (tv !== undefined) out[k] = tv;
+    }}
+    return out;
+  }},
+  configurable: false,
+}});
+Object.defineProperty(globalThis, "__langshell_untag_value", {{
+  value: function untag(value) {{
+    if (value === null || typeof value !== "object") return value;
+    if (Array.isArray(value)) return value.map(untag);
+    const tag = value.__lang;
+    if (tag === "bigint") return BigInt(value.v);
+    if (tag === "date") return new Date(value.v);
+    if (tag === "uint8array") return new Uint8Array(value.v);
+    if (tag === "map") return new Map(value.v.map(([k, v]) => [untag(k), untag(v)]));
+    if (tag === "set") return new Set(value.v.map(untag));
+    const out = {{}};
+    for (const [k, v] of Object.entries(value)) out[k] = untag(v);
+    return out;
+  }},
+  configurable: false,
+}});
 Object.defineProperty(globalThis, "__langshell_restore_globals", {{
   value: (globals) => {{
     for (const [key, value] of Object.entries(globals ?? {{}})) {{
-      Object.defineProperty(globalThis, key, {{ value, writable: true, configurable: true }});
+      const restored = globalThis.__langshell_untag_value(value);
+      Object.defineProperty(globalThis, key, {{ value: restored, writable: true, configurable: true }});
     }}
   }},
   configurable: false,
@@ -800,10 +895,10 @@ Object.defineProperty(globalThis, "__langshell_snapshot_globals", {{
     for (const key of Object.getOwnPropertyNames(globalThis)) {{
       if (globalThis.__langshell_baseline.has(key) || key.startsWith("__langshell")) continue;
       const value = globalThis[key];
-      if (typeof value === "function" || typeof value === "symbol" || typeof value === "undefined" || typeof value === "bigint") continue;
+      if (typeof value === "function" || typeof value === "symbol" || typeof value === "undefined") continue;
       try {{
-        JSON.stringify(value);
-        out[key] = value;
+        const tagged = globalThis.__langshell_tag_value(value, new WeakSet());
+        if (tagged !== undefined) out[key] = tagged;
       }} catch (_) {{}}
     }}
     return out;
@@ -1019,47 +1114,163 @@ fn execute_script_unit(
         .map_err(|err| error_from_js(err.to_string(), false))
 }
 
+/// Globals that can break the LangShell sandbox; member access or call is forbidden.
+const TS_BLOCKED_GLOBALS: &[&str] = &[
+    "Deno",
+    "process",
+    "Bun",
+    "XMLHttpRequest",
+    "WebSocket",
+    "Worker",
+    "SharedWorker",
+    "navigator",
+    "globalThis",
+];
+
+/// Direct callable identifiers that escape the sandbox.
+const TS_BANNED_CALLABLES: &[&str] = &["eval", "Function", "require", "fetch"];
+
+/// Free-functions that look like external capabilities; flagged when not registered.
+const TS_SUSPICIOUS_NAMES: &[&str] = &["fetch_url", "query_db", "send_email"];
+
 fn static_validation_error(code: &str, registry: &ToolRegistry) -> Option<ErrorObject> {
-    let unsupported = [
-        "import ",
-        "export ",
-        "import(",
-        "require(",
-        "Deno.",
-        "Deno[",
-        "fetch(",
-        "XMLHttpRequest",
-        "WebSocket",
-        "process.",
-        "Bun.",
-        "eval(",
-        "Function(",
-    ];
-    unsupported
-        .iter()
-        .find(|pattern| code.contains(**pattern))
-        .map(|pattern| {
-            ErrorObject::new(
-                "UNSUPPORTED_FEATURE",
-                format!("Use of {pattern:?} is not supported in the LangShell Deno sandbox."),
-            )
-            .with_hint(
-                "Use a registered capability such as read_text, fetch_json, or list_tools instead.",
-            )
-        })
-        .or_else(|| {
-            let suspicious = ["fetch_url", "query_db", "send_email"];
-            suspicious
-                .iter()
-                .find(|name| code.contains(&format!("{name}(")) && !registry.contains(name))
-                .map(|name| {
-                    ErrorObject::new(
-                        "UNKNOWN_TOOL",
-                        format!("Function {name} is not registered."),
-                    )
-                    .with_hint("Call list_tools() to inspect available capabilities.")
-                })
-        })
+    use deno_ast::swc::ast::{
+        CallExpr, Callee, Expr, ImportDecl, MemberExpr, ModuleDecl, NamedExport, Program,
+    };
+    use deno_ast::swc::ecma_visit::{Visit, VisitWith};
+
+    let specifier = match deno_core::resolve_url("file:///langshell-validate.ts") {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+    let parsed = match deno_ast::parse_module(ParseParams {
+        specifier,
+        text: code.to_owned().into(),
+        media_type: MediaType::TypeScript,
+        capture_tokens: false,
+        scope_analysis: false,
+        maybe_syntax: None,
+    }) {
+        Ok(p) => p,
+        // Let `transpile_typescript` produce a precise SYNTAX_ERROR.
+        Err(_) => return None,
+    };
+
+    struct V<'r> {
+        registry: &'r ToolRegistry,
+        error: Option<ErrorObject>,
+    }
+
+    impl<'r> V<'r> {
+        fn flag_unsupported(&mut self, what: &str) {
+            if self.error.is_some() {
+                return;
+            }
+            self.error = Some(
+                ErrorObject::new(
+                    "UNSUPPORTED_FEATURE",
+                    format!(
+                        "Use of {what:?} is not supported in the LangShell Deno sandbox."
+                    ),
+                )
+                .with_hint(
+                    "Use a registered capability such as read_text, fetch_json, or list_tools instead.",
+                ),
+            );
+        }
+
+        fn flag_unknown_tool(&mut self, name: &str) {
+            if self.error.is_some() {
+                return;
+            }
+            self.error = Some(
+                ErrorObject::new(
+                    "UNKNOWN_TOOL",
+                    format!("Function {name} is not registered."),
+                )
+                .with_hint("Call list_tools() to inspect available capabilities."),
+            );
+        }
+    }
+
+    impl<'r> Visit for V<'r> {
+        fn visit_module_decl(&mut self, node: &ModuleDecl) {
+            if self.error.is_some() {
+                return;
+            }
+            match node {
+                ModuleDecl::Import(_)
+                | ModuleDecl::ExportDecl(_)
+                | ModuleDecl::ExportNamed(_)
+                | ModuleDecl::ExportDefaultDecl(_)
+                | ModuleDecl::ExportDefaultExpr(_)
+                | ModuleDecl::ExportAll(_) => {
+                    self.flag_unsupported("import/export");
+                }
+                _ => {}
+            }
+        }
+
+        fn visit_import_decl(&mut self, _node: &ImportDecl) {
+            self.flag_unsupported("import");
+        }
+
+        fn visit_named_export(&mut self, _node: &NamedExport) {
+            self.flag_unsupported("export");
+        }
+
+        fn visit_call_expr(&mut self, node: &CallExpr) {
+            if self.error.is_some() {
+                return;
+            }
+            match &node.callee {
+                Callee::Import(_) => {
+                    self.flag_unsupported("dynamic import()");
+                    return;
+                }
+                Callee::Expr(expr) => {
+                    if let Expr::Ident(ident) = expr.as_ref() {
+                        let name = ident.sym.as_ref();
+                        if TS_BANNED_CALLABLES.contains(&name) {
+                            self.flag_unsupported(&format!("{name}(...)"));
+                            return;
+                        }
+                        if TS_SUSPICIOUS_NAMES.contains(&name) && !self.registry.contains(name) {
+                            self.flag_unknown_tool(name);
+                            return;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            node.visit_children_with(self);
+        }
+
+        fn visit_member_expr(&mut self, node: &MemberExpr) {
+            if self.error.is_some() {
+                return;
+            }
+            if let Expr::Ident(ident) = node.obj.as_ref() {
+                let name = ident.sym.as_ref();
+                if TS_BLOCKED_GLOBALS.contains(&name) {
+                    self.flag_unsupported(name);
+                    return;
+                }
+            }
+            node.visit_children_with(self);
+        }
+    }
+
+    let mut v = V {
+        registry,
+        error: None,
+    };
+    let program = parsed.program();
+    match program.as_ref() {
+        Program::Module(module) => module.visit_children_with(&mut v),
+        Program::Script(script) => script.visit_children_with(&mut v),
+    }
+    v.error
 }
 
 fn effective_limits(default_limits: &SessionLimits, request: &RunRequest) -> SessionLimits {
@@ -1130,12 +1341,27 @@ fn worker_closed_error() -> ErrorObject {
     ErrorObject::new("RUNTIME_ERROR", "LangShell Deno worker is not available.")
 }
 
-fn truncate_stdout(mut stdout: String, limits: &SessionLimits) -> String {
-    let max = limits.max_stdout_bytes as usize;
-    if stdout.len() > max {
-        stdout.truncate(max);
+fn truncate_stdout(stdout: String, limits: &SessionLimits) -> (String, bool) {
+    let mut stdout = stdout;
+    let truncated = truncate_utf8(&mut stdout, limits.max_stdout_bytes as usize);
+    (stdout, truncated)
+}
+
+fn apply_streams(result: &mut RunResult, state: RunStateSnapshot, limits: &SessionLimits) {
+    let (stdout, stdout_truncated) = truncate_stdout(state.stdout, limits);
+    let (stderr, stderr_truncated) = truncate_stdout(state.stderr, limits);
+    result.stdout = stdout;
+    result.stderr = stderr;
+    result.external_calls = state.records;
+    if stdout_truncated || stderr_truncated {
+        result.diagnostics.push(Diagnostic::warning(
+            "STDOUT_EXCEEDED",
+            format!(
+                "stdout/stderr exceeded the {} byte limit and was truncated.",
+                limits.max_stdout_bytes
+            ),
+        ));
     }
-    stdout
 }
 
 fn metrics(started: Instant, external_calls_count: u32) -> Metrics {
@@ -1159,23 +1385,10 @@ fn capability_digest(registry: &ToolRegistry) -> String {
 mod tests {
     use super::*;
     use langshell_core::{Capability, RegisteredTool, SideEffect};
+    use std::sync::{LazyLock, Mutex};
 
-    #[tokio::test]
-    async fn runs_typescript_and_reuses_state() {
-        let runtime = DenoRuntime::new(ToolRegistry::new(), SessionLimits::default());
-        let mut first = RunRequest::new("s1", "cache = { k: 1 }").unwrap();
-        first.language = Language::TypeScript;
-        assert_eq!(runtime.run(first).await.status, RunStatus::Ok);
-
-        let mut second = RunRequest::new("s1", "result = cache.k + 1").unwrap();
-        second.language = Language::TypeScript;
-        let result = runtime.run(second).await;
-        assert_eq!(result.status, RunStatus::Ok, "{result:?}");
-        assert_eq!(result.result, Some(json!(2)));
-    }
-
-    #[tokio::test]
-    async fn supports_async_external_function() {
+    static DENO_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    static DENO_TEST_RUNTIME: LazyLock<DenoRuntime> = LazyLock::new(|| {
         let mut registry = ToolRegistry::new();
         registry
             .register(RegisteredTool::asynchronous(
@@ -1189,45 +1402,158 @@ mod tests {
                 },
             ))
             .unwrap();
-        let runtime = DenoRuntime::new(registry, SessionLimits::default());
-        let mut request = RunRequest::new(
-            "s1",
-            r#"
+        DenoRuntime::new(registry, SessionLimits::default())
+    });
+
+    fn run_deno_test(test: impl std::future::Future<Output = ()>) {
+        let _guard = DENO_TEST_LOCK.lock().expect("deno test lock");
+        tokio::runtime::Runtime::new()
+            .expect("deno test runtime")
+            .block_on(test);
+    }
+
+    #[test]
+    fn runs_typescript_and_reuses_state() {
+        run_deno_test(async {
+            let runtime = &*DENO_TEST_RUNTIME;
+            let mut first = RunRequest::new("ts-state-unit", "cache = { k: 1 }").unwrap();
+            first.language = Language::TypeScript;
+            assert_eq!(runtime.run(first).await.status, RunStatus::Ok);
+
+            let mut second = RunRequest::new("ts-state-unit", "result = cache.k + 1").unwrap();
+            second.language = Language::TypeScript;
+            let result = runtime.run(second).await;
+            assert_eq!(result.status, RunStatus::Ok, "{result:?}");
+            assert_eq!(result.result, Some(json!(2)));
+        });
+    }
+
+    #[test]
+    fn supports_async_external_function() {
+        run_deno_test(async {
+            let runtime = &*DENO_TEST_RUNTIME;
+            let mut request = RunRequest::new(
+                "ts-fetch-unit",
+                r#"
 data = await fetch_json("https://api.example.com/item")
 result = { url: data.url }
 "#,
-        )
-        .unwrap();
-        request.language = Language::TypeScript;
-        let result = runtime.run(request).await;
-        assert_eq!(result.status, RunStatus::Ok, "{result:?}");
-        assert_eq!(
-            result.result,
-            Some(json!({"url": "https://api.example.com/item"}))
-        );
-        assert_eq!(result.metrics.external_calls_count, 1);
+            )
+            .unwrap();
+            request.language = Language::TypeScript;
+            let result = runtime.run(request).await;
+            assert_eq!(result.status, RunStatus::Ok, "{result:?}");
+            assert_eq!(
+                result.result,
+                Some(json!({"url": "https://api.example.com/item"}))
+            );
+            assert_eq!(result.metrics.external_calls_count, 1);
+        });
     }
 
-    #[tokio::test]
-    async fn snapshots_json_globals() {
-        let runtime = DenoRuntime::new(ToolRegistry::new(), SessionLimits::default());
-        let mut first = RunRequest::new("s1", "state = { step: 1 }").unwrap();
-        first.language = Language::TypeScript;
-        assert_eq!(runtime.run(first).await.status, RunStatus::Ok);
+    #[test]
+    fn snapshots_json_globals() {
+        run_deno_test(async {
+            let runtime = &*DENO_TEST_RUNTIME;
+            let mut first = RunRequest::new("ts-snap-json", "state = { step: 1 }").unwrap();
+            first.language = Language::TypeScript;
+            assert_eq!(runtime.run(first).await.status, RunStatus::Ok);
 
-        let snapshot = runtime
-            .snapshot_session(&SessionId("s1".to_owned()))
-            .await
-            .unwrap();
-        runtime
-            .restore_session(&snapshot, Some(SessionId("s2".to_owned())))
-            .await
-            .unwrap();
+            let snapshot = runtime
+                .snapshot_session(&SessionId("ts-snap-json".to_owned()))
+                .await
+                .unwrap();
+            runtime
+                .restore_session(
+                    &snapshot,
+                    Some(SessionId("ts-snap-json-restore".to_owned())),
+                )
+                .await
+                .unwrap();
 
-        let mut second = RunRequest::new("s2", "result = state.step").unwrap();
-        second.language = Language::TypeScript;
-        let result = runtime.run(second).await;
-        assert_eq!(result.status, RunStatus::Ok, "{result:?}");
-        assert_eq!(result.result, Some(json!(1)));
+            let mut second =
+                RunRequest::new("ts-snap-json-restore", "result = state.step").unwrap();
+            second.language = Language::TypeScript;
+            let result = runtime.run(second).await;
+            assert_eq!(result.status, RunStatus::Ok, "{result:?}");
+            assert_eq!(result.result, Some(json!(1)));
+        });
+    }
+
+    #[test]
+    fn ast_validator_blocks_real_import() {
+        let registry = ToolRegistry::new();
+        let err = static_validation_error("import x from 'mod';", &registry).unwrap();
+        assert_eq!(err.code, "UNSUPPORTED_FEATURE");
+    }
+
+    #[test]
+    fn ast_validator_allows_blocked_word_in_string_literal() {
+        let registry = ToolRegistry::new();
+        assert!(
+            static_validation_error("const s = 'import Deno.fetch eval';", &registry).is_none()
+        );
+    }
+
+    #[test]
+    fn ast_validator_blocks_global_member_access() {
+        let registry = ToolRegistry::new();
+        let err = static_validation_error("const v = Deno.cwd();", &registry).unwrap();
+        assert_eq!(err.code, "UNSUPPORTED_FEATURE");
+    }
+
+    #[test]
+    fn ast_validator_blocks_eval_call() {
+        let registry = ToolRegistry::new();
+        let err = static_validation_error("eval('1+1');", &registry).unwrap();
+        assert_eq!(err.code, "UNSUPPORTED_FEATURE");
+    }
+
+    #[test]
+    fn ast_validator_flags_unregistered_suspicious_call() {
+        let registry = ToolRegistry::new();
+        let err = static_validation_error("fetch_url('x');", &registry).unwrap();
+        assert_eq!(err.code, "UNKNOWN_TOOL");
+    }
+
+    #[test]
+    fn snapshots_preserve_typed_globals() {
+        run_deno_test(async {
+            let runtime = &*DENO_TEST_RUNTIME;
+            let mut first = RunRequest::new(
+                "ts-snap-typed",
+                "big = 9007199254740993n; bytes = new Uint8Array([1,2,3]); when = new Date(0);",
+            )
+            .unwrap();
+            first.language = Language::TypeScript;
+            assert_eq!(runtime.run(first).await.status, RunStatus::Ok);
+
+            let snap = runtime
+                .snapshot_session(&SessionId("ts-snap-typed".to_owned()))
+                .await
+                .unwrap();
+            assert!(is_deno_snapshot(&snap));
+            runtime
+                .restore_session(&snap, Some(SessionId("ts-snap-typed-restore".to_owned())))
+                .await
+                .unwrap();
+
+            let mut probe = RunRequest::new(
+                "ts-snap-typed-restore",
+            "result = { isBig: typeof big === 'bigint' && big === 9007199254740993n, bytes: Array.from(bytes), iso: when.toISOString() };",
+        )
+        .unwrap();
+            probe.language = Language::TypeScript;
+            let result = runtime.run(probe).await;
+            assert_eq!(result.status, RunStatus::Ok, "{result:?}");
+            assert_eq!(
+                result.result,
+                Some(json!({
+                    "isBig": true,
+                    "bytes": [1, 2, 3],
+                    "iso": "1970-01-01T00:00:00.000Z",
+                }))
+            );
+        });
     }
 }

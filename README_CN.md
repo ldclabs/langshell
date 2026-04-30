@@ -1,104 +1,113 @@
-# 🖥️ LangShell
+# LangShell
 
-> Stateful, capability-scoped, sandboxed code execution for AI agents.
+> 面向 AI Agent 的状态持久、能力受控、安全沙箱代码执行层。
 
 **[English](./README.md) | [中文](./README_CN.md)**
 
-LangShell 是一个面向 AI Agent 的安全执行层，目标是让 Agent 直接输出一段可验证、可恢复、可审计的 Python 代码来完成复杂任务，而不是把工作拆成大量脆弱的 tool calls。
+LangShell 让宿主可以在持久 session 中运行 Agent 生成的 Python 或 TypeScript 代码，同时把文件、网络、数据库和业务系统等外部交互全部收束到宿主显式注册的 capability 函数上。
 
-项目以 Rust 实现，MVP 采用 Pydantic Monty 作为 Python 子集执行引擎。LangShell 的核心思想是：把代码作为接口，把 session 作为状态单元，把宿主显式注册的 capability 作为唯一外部世界入口。
+项目处于活跃开发阶段。在稳定版本发布前，本地 session 快照和内部数据格式都可以直接变更，不提供旧数据迁移兼容。当前开发基线使用 CBOR 快照、基于 AST 的静态校验，以及带 schema 的 capability 描述。
 
 ## 当前状态
 
-这个仓库现在已经包含 LangShell 核心流程的 MVP 实现。
+- `langshell-core` 定义 session、capability、diagnostic、metric、error、snapshot 和 runtime backend 的共享契约。
+- `langshell-monty` 通过 Monty 执行 Python 子集代码，支持持久 session、top-level await、AST 校验、结果捕获、外部调用审计和 CBOR 快照。
+- `langshell-deno` 通过 Deno/V8 执行 TypeScript，实现同一个 runtime trait，支持持久 globals、AST 校验、带类型标签的 CBOR 快照和 async capability 调度。
+- `langshell-tools` 提供 discovery 工具，以及宿主可配置的文件和 HTTP capability helper。
+- `langshell` 提供后端无关的 Rust SDK builder，用于配置限制、挂载、allowlist、sync/async capability 和 runtime。
+- `langshell-cli` 提供 `run`、`validate`、`repl`、`daemon`、`session`、`tools` 命令，输出稳定 JSON。
+- 端到端脚本和 SDK 覆盖位于 [examples/README.md](./examples/README.md)、后端 crate 测试和 SDK 测试中。
 
-- Cargo workspace、crate 拆分、Monty 依赖补丁与设计契约文档已经就位。
-- `langshell-core`、`langshell-monty`、`langshell-deno`、`langshell-tools`、`langshell`、`langshell-cli` 已实现 MVP 的 run、validate、session、snapshot、SDK 与 JSON-RPC daemon 路径。
-- 公共 SDK `langshell` 已与具体后端解耦；宿主通过 `LanguageRuntime` trait 自行选择并注册 `langshell-monty` 或 `langshell-deno`。
-- [AGENTS.md](AGENTS.md) 仍是最完整的产品需求与工程契约来源。
-- [SKILL.md](SKILL.md) 描述了 AI Agent 如何安全地使用 LangShell。
-
-当前 MVP 有意保持范围收敛：优先保证稳定 JSON 结果、Monty 状态执行、显式 capability，以及 [AGENTS.md](AGENTS.md) 中的端到端验收用例。
+[AGENTS.md](AGENTS.md) 是产品与工程契约来源。[SKILL.md](SKILL.md) 描述 AI Agent 如何安全使用 LangShell。
 
 ## 为什么是 LangShell
 
-传统 Agent 执行路径通常落在两种极端之间：
+传统 Agent 执行路径常落在两个不理想的端点：
 
-- tool-calling 过于碎片化，复杂逻辑需要多轮往返，成本高且恢复困难。
-- 普通 shell 权限过大、状态脆弱、输出难解析，不适合运行不可信的 LLM 代码。
+- Tool calling 足够安全，但过于碎片化。复杂任务会变成大量往返、重复上下文、脆弱恢复和不断扩张的 schema。
+- 普通 shell 足够表达力强，但权限过大。它拥有广泛的环境访问、弱结构化输出、脆弱解析，也没有天然 capability 边界。
 
 LangShell 试图提供中间层：
 
 ```text
-AI tokens -> Python code -> safe execution -> structured result -> resumable state
+AI tokens -> sandboxed code -> mediated capabilities -> structured result -> resumable state
 ```
 
-它希望同时满足三类角色：
+它同时服务三类角色：
 
-- AI Agent：能用熟悉的 Python 表达循环、条件、缓存、重试、并发和数据变换。
-- Agent 框架开发者：能以稳定协议嵌入执行能力、注册工具、设置限制并收集审计信息。
-- 平台 / 安全负责人：能保持默认零权限，让所有副作用都经过显式能力边界。
+- AI Agent 用代码表达循环、分支、缓存、重试、并发和数据变换。
+- Agent 框架开发者嵌入稳定 runtime、注册工具、控制限制并收集审计记录。
+- 平台和安全负责人保持默认闭合策略，让每个副作用都经过命名 capability。
 
-## 设计原则
+## 核心模型
 
-- Code is the interface：对 Agent 而言，主要接口就是代码，而不是不断扩张的 tool schema。
-- Session is the unit：状态、限制、审计、快照和生命周期都以 session 为中心。
-- Capabilities over permissions：默认没有权限，所有外部能力都需要宿主显式注册。
-- Every side effect is mediated：文件、网络、数据库等副作用都必须经过宿主能力。
-- Errors are for agents：错误必须稳定、结构化、可用于自动修复与重试。
+- **代码即接口**：Agent 用代码表达多步逻辑，而不是拆成大量微小 tool call。
+- **Session 是状态单元**：变量、函数、globals、capability、限制和快照都属于 session。
+- **Capability 替代环境权限**：文件系统、网络、数据库和业务 API 只能通过注册函数访问。
+- **执行前校验**：Python 和 TypeScript 都通过 AST 检测危险 import、危险全局、反射逃逸模式和未知 capability-like 调用。
+- **开发期版本化快照**：当前快照是 CBOR v2。旧本地快照不会被迁移。
 
-## 目标能力
+## 已实现能力
 
-LangShell 的 MVP 目标包括：
+- Monty 后端的状态持久 Python 子集执行。
+- Deno/V8 后端的状态持久 TypeScript 执行。
+- Top-level await 与 async capability 调用。
+- Validate / dry-run，在副作用发生前捕获语法、权限、特性和工具可用性问题。
+- `list_tools`、`describe_tool`、`current_policy` 能力发现。
+- 结构化 `RunResult`，包含 `result`、stdout、stderr、diagnostic、external call、metric 和稳定错误码。
+- 结果捕获优先级：全局 `result`，其次是后端支持的最后表达式，再回退 stdout。
+- 墙钟超时、输出大小、内存、栈深和外部调用次数限制。
+- 用于 session restore 的 CBOR 快照。Deno 快照对 `bigint`、`Uint8Array`、`Map`、`Set` 和 `Date` 做类型标签保存。
+- 基于 Unix socket 的 JSON-RPC daemon，用于 session、run、snapshot、restore 和 tools 操作。
 
-- 支持状态持久的 Python 子集执行。
-- 支持 top-level await 与 async capability 调用。
-- 支持 validate / dry-run，在不产生副作用的前提下发现语法、类型、权限和工具存在性问题。
-- 支持 capability registry，让宿主以函数形式暴露受控能力。
-- 支持 list_tools、describe_tool、current_policy 等能力发现接口。
-- 支持结构化结果、stdout / stderr 捕获、诊断信息与错误码。
-- 支持超时、取消、输出大小、内存与外部调用次数限制。
-- 支持 snapshot / restore，用于中断恢复与审批边界暂停。
+## 当前约束
 
-MVP 优先内置的能力是受控文件访问与受控 HTTP 访问，例如 read_text、write_text、list_dir、fetch_text、fetch_json。
+- Monty 是 Python 子集，不是 CPython。未支持的标准库、第三方包、子进程、raw socket 和反射逃逸会被阻断或不可用。
+- TypeScript 后端已经可用，但 Deno/V8 生命周期封装在 `LanguageRuntime` trait 和专用 worker 中。
+- 文件工具只有在宿主配置授权虚拟挂载后才可用。
+- 内置 HTTP helper 会执行 allowlist 和 schema 检查，但默认构建不包含真实网络传输；宿主需要注册自己的 `fetch_text` 或 `fetch_json` capability。
+- CLI daemon 当前支持 `unix://` listener。
+- 开发期数据可丢弃：本地 session 文件和快照可能随代码变更失效。
 
-## 架构概览
+## 架构
 
 ```text
 Agent / Host App
-		|
-		+-- CLI
-		+-- JSON-RPC Daemon
-		+-- Rust SDK
-						|
-						v
-            langshell SDK
-						|
-		 +------+----------------+
-		 |                       |
-		 v                       v
-langshell-tools      langshell-core
-										|
-										v
-						LanguageRuntime trait
-										|
-	 +------------------+------------------+
-	 |                                     |
-	 v                                     v
-langshell-monty                       langshell-deno
-	 |                                     |
-	 v                                     v
- Monty VM                              Deno/V8
+    |
+    +-- CLI
+    +-- JSON-RPC Daemon
+    +-- Rust SDK
+            |
+            v
+      langshell SDK
+            |
+     +------+----------------+
+     |                       |
+     v                       v
+langshell-tools        langshell-core
+                              |
+                              v
+                       LanguageRuntime trait
+                              |
+              +---------------+---------------+
+              |                               |
+              v                               v
+       langshell-monty                 langshell-deno
+              |                               |
+              v                               v
+           Monty VM                         Deno/V8
 ```
 
-职责划分遵循以下边界：
+## Crates
 
-- `langshell-core`：核心抽象，包括 session、policy、registry、snapshot、diagnostics 与 `LanguageRuntime` 后端 trait 的稳定契约。
-- `langshell-monty`：MVP 执行后端，封装所有 Monty 相关适配。
-- `langshell-deno`：TypeScript / Deno 执行后端，实现同一 runtime trait。
-- `langshell-tools`：内置能力模块，例如文件与 HTTP 工具。
-- `langshell-cli`：面向开发者的命令行入口，未来承载 run、validate、repl、daemon、session、tools 等命令。
-- `langshell`：公共 Rust SDK，供宿主注册能力、选择后端并发起执行，本身不依赖具体执行引擎。
+| Crate             | 职责                                                                                 |
+| ----------------- | ------------------------------------------------------------------------------------ |
+| `langshell-core`  | session、run、capability、diagnostic、metric、snapshot 和 runtime trait 的共享契约。 |
+| `langshell-monty` | 基于 Monty 的 Python runtime 实现。                                                  |
+| `langshell-deno`  | 基于 Deno/V8 的 TypeScript runtime 实现。                                            |
+| `langshell-tools` | Discovery、文件和 HTTP capability helper。                                           |
+| `langshell`       | 用于组合 runtime 与注册 capability 的公共 Rust SDK。                                 |
+| `langshell-cli`   | CLI 二进制与 JSON-RPC daemon。                                                       |
 
 ## 仓库结构
 
@@ -112,75 +121,84 @@ langshell/
 │   ├── langshell-monty/
 │   └── langshell-tools/
 ├── docs/
+├── examples/
 ├── AGENTS.md
 ├── SKILL.md
 └── README.md
 ```
 
-目前各 crate 仍是初始化骨架，但目录边界已经与产品文档中的工程契约保持一致，适合作为后续实现的落点。
-
-## 目标接口示例
-
-以下示例描述的是 LangShell 的目标使用体验，不代表当前仓库已经具备这些命令或行为。
-
-### Agent 侧 Python
+## Python 示例
 
 ```python
 import json
 
 async def main():
-		items = await fetch_json("https://api.example.com/items")
-		selected = [item for item in items if item.get("score", 0) >= 0.8]
-		await write_text("/workspace/selected.json", json.dumps(selected))
-		return {"selected": len(selected), "total": len(items)}
+    items = await fetch_json("https://api.example.com/items")
+    selected = [item for item in items if item.get("score", 0) >= 0.8]
+    await write_text("/workspace/selected.json", json.dumps(selected))
+    return {"selected": len(selected), "total": len(items)}
 
 result = await main()
 print(json.dumps(result))
 ```
 
-### CLI 目标形态
+## CLI 示例
 
 ```bash
-langshell run -e 'result = sum(range(10))' --json
-langshell validate -f script.py --session-id agent-123
-langshell daemon --listen unix:///tmp/langshell.sock
-langshell session snapshot agent-123 --out snapshot.bin
+cargo run -q -p langshell-cli --bin langshell -- run -e 'result = sum(range(10))' --json
+cargo run -q -p langshell-cli --bin langshell -- validate -e 'open("/etc/passwd")' --json
+cargo run -q -p langshell-cli --bin langshell -- session list
+cargo run -q -p langshell-cli --bin langshell -- daemon --listen unix:///tmp/langshell.sock
 ```
 
-### JSON-RPC 目标形态
+## Rust SDK 示例
+
+```rust
+use langshell::{LangShell, SideEffect};
+use langshell_monty::MontyRuntime;
+use serde_json::{Value, json};
+
+let shell = LangShell::builder()
+    .runtime(MontyRuntime::new)
+    .register_async(
+        "fetch_json",
+        "Fetch JSON from an approved source.",
+        SideEffect::Network,
+        json!({"type": "array", "prefixItems": [{"type": "string"}], "minItems": 1, "maxItems": 1}),
+        json!({"type": "object"}),
+        |ctx| async move {
+            let url = ctx.args.first().and_then(Value::as_str).unwrap_or_default();
+            Ok(json!({"url": url, "ok": true}))
+        },
+    )?
+    .build()?;
+```
+
+## JSON-RPC 请求形状
+
+Daemon 使用 Unix socket 上的 line-delimited JSON-RPC 2.0。
 
 ```json
 {
-	"jsonrpc": "2.0",
-	"id": "req-001",
-	"method": "session.run",
-	"params": {
-		"session_id": "agent-123",
-		"language": "python",
-		"code": "result = sum(range(10))",
-		"return_snapshot": true
-	}
+  "jsonrpc": "2.0",
+  "id": "req-001",
+  "method": "session.run",
+  "params": {
+    "session_id": "agent-123",
+    "language": "python",
+    "code": "result = sum(range(10))",
+    "return_snapshot": true
+  }
 }
 ```
 
-## 稳定契约重点
-
-根据当前设计文档，MVP 有几项必须尽早锁定的约束：
-
-- 结果捕获优先级：优先读取全局变量 `result`，其次才是最后表达式值，再次才是 stdout。
-- 错误码需要稳定且可机器解析，例如 `UNKNOWN_TOOL`、`PERMISSION_DENIED`、`RESULT_NOT_SERIALIZABLE`、`TIMEOUT_WALL`。
-- snapshot 需要版本化，并校验 capability 集合，避免静默恢复到不兼容状态。
-- 沙箱默认零权限，不提供宿主文件系统、环境变量、子进程或任意网络访问。
-
-这些约束会直接影响 CLI、daemon、SDK 和测试矩阵的实现方式。
-
-## 开发起步
+## 开发
 
 ### 环境要求
 
-- Rust stable toolchain，且需要支持 Edition 2024。
+- 支持 Edition 2024 的 Rust stable toolchain。
 - Git submodule。
-- macOS、Linux、Windows 中任一受支持平台。
+- macOS、Linux 或 Windows。
 
 ### 拉取仓库
 
@@ -189,60 +207,46 @@ git clone --recurse-submodules <repo-url>
 cd langshell
 ```
 
-如果已经克隆过仓库：
+如果仓库不是用 submodule 模式克隆：
 
 ```bash
 git submodule update --init --recursive
 ```
 
-### 当前可做的基础检查
-
-在仓库仍处于骨架阶段时，建议先运行：
+### 检查
 
 ```bash
-cargo check
-cargo test
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets
 ```
 
-随着运行时与 CLI 落地，再逐步补充 examples、e2e 与安全测试矩阵。
+### 端到端脚本
 
-## 实现优先级建议
+```bash
+bash examples/cli_single.sh
+bash examples/session_reuse.sh
+bash examples/validate_denied.sh
+bash examples/snapshot_restore.sh
+cargo run -q -p langshell-monty --example sdk_async_fanout
+```
 
-如果你准备从这个骨架开始推进 MVP，建议按以下顺序落地：
+CLI 会在设置 `LANGSHELL_SESSION_DIR` 时把开发 session 快照写入该目录，否则使用平台临时目录。这些文件不是稳定存储。
 
-1. 在 `langshell-core` 中定义稳定的数据结构、错误码与 trait 边界。
-2. 在 `langshell-monty` 中完成 Monty 执行适配与结果捕获。
-3. 在 `langshell-tools` 中实现最小内置能力：文件读写、目录列举、HTTP 获取。
-4. 在 `langshell` 中提供 Builder 与 session 运行接口。
-5. 在 `langshell-cli` 中补齐 run、validate、daemon、session、tools 等命令。
-6. 增加 snapshot、JSON-RPC、e2e 示例与安全测试矩阵。
+## 近期工作
+
+- Durable snapshot store。
+- Session fork / diff / reset。
+- 更丰富的生成 stubs 与工具描述。
+- 带真实 transport 的 HTTP helper 和更多 capability 模块。
+- 更完整的安全测试：路径逃逸、工具调用风暴、snapshot 损坏和资源耗尽。
+- Windows named pipe daemon transport。
 
 ## 文档入口
 
-- [AGENTS.md](AGENTS.md)：产品需求、工程契约、错误码、snapshot 与测试矩阵。
-- [SKILL.md](SKILL.md)：Agent 侧使用 LangShell 的方式、限制与最佳实践。
-
-后续如果新增 RFC、API 参考或示例，建议统一放入 `docs/` 与 `examples/` 目录，并在 README 中持续链接。
-
-## 路线图
-
-### MVP
-
-- Monty 集成。
-- session 状态持久。
-- 结构化结果与诊断输出。
-- validate 模式。
-- capability registry。
-- 内置文件与 HTTP 能力。
-- CLI、daemon IPC、Rust SDK 的最小可用链路。
-
-### V1+
-
-- durable snapshot store。
-- 更完整的 typed stubs 与工具描述注入。
-- SQLite / object_store 插件。
-- TypeScript / Deno backend。
-- 多租户 daemon 与远程执行能力。
+- [AGENTS.md](AGENTS.md)：产品方向、runtime 契约、数据结构、snapshot 格式、错误码和测试矩阵。
+- [SKILL.md](SKILL.md)：Agent 侧安全使用指南。
+- [examples/README.md](./examples/README.md)：可运行的 CLI 与 SDK 示例。
 
 ## 许可证
 

@@ -14,8 +14,12 @@ categories = ["asynchronous", "development-tools"]
 
 [dependencies]
 langshell-core = { path = "../langshell-core", version = "0.2" }
+ciborium = { workspace = true }
 futures = { workspace = true }
-monty = { workspace = true }
+ic_auth_types = { workspace = true }
+monty = { git = "https://github.com/pydantic/monty.git", tag = "v0.0.17" }
+ruff_python_ast = { git = "https://github.com/astral-sh/ruff.git", package = "ruff_python_ast", rev = "6ded4bed1651e30b34dd04cdaa50c763036abb0d" }
+ruff_python_parser = { git = "https://github.com/astral-sh/ruff.git", package = "ruff_python_parser", rev = "6ded4bed1651e30b34dd04cdaa50c763036abb0d" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

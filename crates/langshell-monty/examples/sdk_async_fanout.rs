@@ -10,6 +10,8 @@ async fn main() {
             "fetch_json",
             "Example fetch_json capability.",
             SideEffect::Network,
+            json!({"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 1}),
+            json!({"type": "object", "properties": {"url": {"type": "string"}, "score": {"type": "number"}}, "required": ["url", "score"]}),
             |ctx| async move {
                 let url = ctx.args.first().and_then(Value::as_str).unwrap_or_default();
                 Ok(json!({"url": url, "score": 0.9}))
